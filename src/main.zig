@@ -235,7 +235,7 @@ pub const AdlerType = enum {
 };
 
 pub const Args = struct {
-    pub const Positional = PositionalOf(.{
+    pub const Positionals = PositionalOf(.{
         .TupleType = struct {
             IOFlavour,
             AdlerType,
@@ -246,14 +246,26 @@ pub const Args = struct {
 
     pub const Help: HelpData(@This()) = .{
         .usage = &.{"flechette <iotype> <adlertype> <file>"},
-        .description = "cli to run adler algorithm in a file, which is treated as a binary",
+        .description = "Cli to run hashing algorithms on a file treated as binary",
         .examples = &.{
             "flechette nmap adler32 random_1kb.bin",
             "flechette nmap adler64 random_250mb.bin",
             "flechette buffered adler32 random_32gb.bin",
             "flechette buffered adler64 random_250gb.bin",
         },
+        .positionalsDescription = .{
+            .tuple = &.{
+                "IOFlavour to use to read the binary",
+                "Hashing algorith to use",
+                "file path (relative)",
+            },
+        },
     };
+
+    pub const HelpFmt = args.help.HelpFmt(
+        Args,
+        .{ .simpleTypes = true, .optionsBreakline = true },
+    );
 };
 
 pub fn main() !u8 {
@@ -264,32 +276,9 @@ pub fn main() !u8 {
     var stderrW = std.fs.File.stderr().writer(&buff);
     var w = &stderrW.interface;
 
-    var iter = std.process.args();
-    const cursor = rv: {
-        var c: Cursor([]const u8) = .{
-            .curr = null,
-            .ptr = @ptrCast(&iter),
-            .vtable = &.{ .next = &AsCursor(@TypeOf(iter)).next },
-        };
-        break :rv &c;
-    };
     var res: SpecResponse(Args) = .init(allocator);
-    res.parse(cursor) catch |E| {
-        const message: []const u8 = switch (E) {
-            inline else => |e| comptime rv: {
-                break :rv zpec.collections.ComptSb.initTup(.{
-                    "Execution failure reason: ",
-                    @errorName(e),
-                    "\n\n",
-                    args.help.HelpFmt(
-                        Args,
-                        .{ .simpleTypes = true, .optionsBreakline = true },
-                    ).help(),
-                    "\n\n",
-                }).s;
-            },
-        };
-        try w.writeAll(message);
+    res.parseArgs() catch |E| {
+        try w.writeAll(Args.HelpFmt.helpForErr(@TypeOf(res).Error, E, "Failed with reason: "));
         try w.flush();
         return 1;
     };
