@@ -248,8 +248,8 @@ pub const Args = struct {
         .usage = &.{"flechette <iotype> <adlertype> <file>"},
         .description = "Cli to run hashing algorithms on a file treated as binary",
         .examples = &.{
-            "flechette nmap adler32 random_1kb.bin",
-            "flechette nmap adler64 random_250mb.bin",
+            "flechette mmap adler32 random_1kb.bin",
+            "flechette mmap adler64 random_250mb.bin",
             "flechette buffered adler32 random_32gb.bin",
             "flechette buffered adler64 random_250gb.bin",
         },
