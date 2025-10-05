@@ -22,7 +22,7 @@ fn AdlerHash(comptime adlerType: AdlerType) type {
         },
         .adler64 => .{
             0xFFFFFFFB,
-            55517953,
+            363898415,
             32,
             0xFFFFFFFF,
         },
