@@ -167,10 +167,12 @@ fn hdiff(data: []const u8, a: u64, b: u64) u64 {
     var ptr = data.ptr;
 
     while (len >= 4) {
-        const a1 = fadler64Table[ptr[1]];
-        var a2 = fadler64Table[ptr[2]];
-        const a3 = fadler64Table[ptr[3]];
-        const a0 = fadler64Table[ptr[0]] + adler;
+        const idx0, const idx1, const idx2, const idx3 = ptr[0..4].*;
+
+        const a1 = fadler64Table[idx1];
+        var a2 = fadler64Table[idx2];
+        const a3 = fadler64Table[idx3];
+        const a0 = fadler64Table[idx0] + adler;
 
         adler = a0 + a1;
         sum += a0 * 2 + a1;
@@ -213,9 +215,9 @@ pub fn roll(self: *@This(), data: []const u8) void {
         .scalar => scalar(data, 1, 0),
         .hdiff => hdiff(data, 1, 0),
         .scalar2 => scalar2(data, 1, 0),
-        .scalar4 => scalar2(data, 1, 0),
-        .scalar8 => scalar2(data, 1, 0),
-        .scalar16 => scalar2(data, 1, 0),
+        .scalar4 => scalar4(data, 1, 0),
+        .scalar8 => scalar8(data, 1, 0),
+        .scalar16 => scalar16(data, 1, 0),
     };
 
     if (self.firstRun) {
