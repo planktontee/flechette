@@ -1,98 +1,23 @@
 const std = @import("std");
 const zpec = @import("zpec");
 const args = zpec.args;
+const coll = zpec.collections;
 const spec = args.spec;
+const codec = zpec.args.codec;
 const positionals = args.positionals;
 const HelpData = args.help.HelpData;
 const PositionalOf = positionals.PositionalOf;
 const SpecResponse = spec.SpecResponse;
-const Cursor = zpec.collections.Cursor;
+const Cursor = coll.Cursor;
 const AsCursor = zpec.collections.AsCursor;
-
-fn AdlerHash(comptime adlerType: AdlerType) type {
-    const T = adlerType.hashT();
-    // 2 ^ bits closer smaller closest prime
-    // nmax is the largest n such that 255n(n+1)/2 + (n+1)(base-1) does not overflow
-    const Base: T, const Nmax: comptime_int, const Shift: comptime_int, const Mask: comptime_int = comptime switch (adlerType) {
-        .adler32 => .{
-            0xFFF1,
-            5552,
-            16,
-            0xFFFF,
-        },
-        .adler64 => .{
-            0xFFFFFFFB,
-            363898415,
-            32,
-            0xFFFFFFFF,
-        },
-    };
-    const VecLen = std.simd.suggestVectorLength(u16) orelse 1;
-    const VecT = @Vector(VecLen, u16);
-    const RBits = Mask - Base + 1;
-
-    return struct {
-        hash: T = 1,
-        // Stolen from a zig branch optimizing adler32 and then changed to work with adler64
-        // https://github.com/ziglang/zig/blob/b27e2ab0afde4aee9d8bc704a05946117ea36a38/lib/std/hash/Adler32.zig
-        pub fn digest(data: []const u8, a: T, b: T) T {
-            const rounds = Nmax / VecLen;
-
-            var s1: T = a;
-            var s2: T = b;
-
-            var i: usize = 0;
-            while (i + Nmax <= data.len) {
-                for (0..rounds) |_| {
-                    const vec: VecT = data[i..][0..VecLen].*;
-
-                    s2 += VecLen * s1;
-                    s1 += @reduce(.Add, vec);
-                    // This is faster than precomputing the table even with prefetch
-                    s2 += @reduce(.Add, vec * std.simd.reverseOrder(
-                        std.simd.iota(u32, VecLen) + @as(VecT, @splat(1)),
-                    ));
-
-                    i += VecLen;
-                }
-
-                // This seems to be as slow as s1 %= s1;
-                s1 = RBits * (s1 >> Shift) + (s1 & Mask);
-                s2 = RBits * (s2 >> Shift) + (s2 & Mask);
-            }
-
-            while (i + VecLen <= data.len) : (i += VecLen) {
-                const vec: VecT = data[i..][0..VecLen].*;
-
-                s2 += VecLen * s1;
-                s1 += @reduce(.Add, vec);
-                s2 += @reduce(.Add, vec * std.simd.reverseOrder(
-                    std.simd.iota(u32, VecLen) + @as(VecT, @splat(1)),
-                ));
-            }
-
-            for (data[i..]) |byte| {
-                s1 += byte;
-                s2 += s1;
-            }
-
-            s1 = RBits * (s1 >> Shift) + (s1 & Mask);
-            s2 = RBits * (s2 >> Shift) + (s2 & Mask);
-
-            return ((s2 % Base) << Shift) | (s1 % Base);
-        }
-
-        pub fn roll(self: *@This(), data: []const u8) void {
-            self.hash = digest(data, self.hash & Mask, (self.hash >> Shift) & Mask);
-        }
-    };
-}
+const adler = @import("adler.zig");
+const fadler = @import("fadler.zig");
 
 fn printReport(
-    comptime adlerType: AdlerType,
+    hashType: []const u8,
     chunkIndex: usize,
     writer: *std.Io.Writer,
-    hash: adlerType.hashT(),
+    hash: anytype,
     elapsed: u64,
     fileSize: u64,
     bytesProcessed: u64,
@@ -103,7 +28,7 @@ fn printReport(
     try writer.print(
         "{s} digest: 0x{x}, elasped {d:.2}s {d:.2}ms, {d:.2} MB/s {d:.2} GB/s, chunk {d} {d:.2}%\n",
         .{
-            @tagName(adlerType),
+            hashType,
             hash,
             elapsedInSec,
             elapsedF / NanoUnit.ms,
@@ -115,10 +40,8 @@ fn printReport(
     );
 }
 
-pub fn ioWithMmap(w: *std.Io.Writer, path: []const u8, comptime adlerType: AdlerType) !void {
+pub fn ioWithMmap(T: type, hasher: *T, verb: *const Res.VerbT, w: *std.Io.Writer, path: []const u8) !void {
     var timer = try std.time.Timer.start();
-
-    var hasher: AdlerHash(adlerType) = .{};
 
     const f = try std.fs.openFileAbsolute(path, .{
         .mode = .read_only,
@@ -137,12 +60,13 @@ pub fn ioWithMmap(w: *std.Io.Writer, path: []const u8, comptime adlerType: Adler
         f.handle,
         0,
     );
+    defer std.posix.munmap(ptr);
 
     hasher.roll(ptr);
 
     try printReport(
-        adlerType,
-        0,
+        @tagName(verb.*),
+        1,
         w,
         hasher.hash,
         timer.read(),
@@ -162,10 +86,8 @@ const ByteUnit = struct {
     pub const gb = 1 << 30;
 };
 
-pub fn ioWithBuffer(w: *std.Io.Writer, path: []const u8, comptime adlerType: AdlerType) !void {
+pub fn ioWithBuffer(T: type, hasher: *T, verb: *const Res.VerbT, w: *std.Io.Writer, path: []const u8) !void {
     var timer = try std.time.Timer.start();
-
-    var hasher: AdlerHash(adlerType) = .{};
 
     const f = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
 
@@ -187,14 +109,14 @@ pub fn ioWithBuffer(w: *std.Io.Writer, path: []const u8, comptime adlerType: Adl
             error.EndOfStream => break,
             error.ReadFailed => return e,
         };
-        hasher.roll(buff);
+        hasher.roll(buff[0..chunkLen]);
 
         chunkIndex += 1;
         bytesProcessed += chunkLen;
     }
 
     try printReport(
-        adlerType,
+        @tagName(verb.*),
         chunkIndex,
         w,
         hasher.hash,
@@ -211,62 +133,164 @@ pub const IOFlavour = enum {
 
     pub fn run(
         self: *const IOFlavour,
+        verb: *const Res.VerbT,
         w: *std.Io.Writer,
-        comptime adlerType: AdlerType,
         path: []const u8,
     ) !void {
-        return switch (self.*) {
-            .mmap => try ioWithMmap(w, path, adlerType),
-            .buffered => try ioWithBuffer(w, path, adlerType),
-        };
+        inline for (std.meta.fields(Res.VerbT)) |field| {
+            if (std.mem.eql(u8, field.name, @tagName(verb.*))) {
+                const Hasher: type = field.type.Options.hasher();
+                var hasher: Hasher = if (Hasher == fadler) .{
+                    .flavour = switch (verb.*) {
+                        .fadler => |cmd| cmd.positionals.tuple.@"0",
+                        else => unreachable,
+                    },
+                } else .{};
+                return switch (self.*) {
+                    .mmap => try ioWithMmap(Hasher, &hasher, verb, w, path),
+                    .buffered => try ioWithBuffer(Hasher, &hasher, verb, w, path),
+                };
+            }
+        } else {
+            @panic("Unrecognizeable Verb passed to IOFlavour");
+        }
     }
 };
 
-pub const AdlerType = enum {
-    adler32,
-    adler64,
+pub const PathCodec = struct {
+    pathBuff: [4098]u8 = undefined,
 
-    pub fn hashT(comptime adlerType: *const @This()) type {
-        return switch (adlerType.*) {
-            .adler32 => u32,
-            .adler64 => u64,
-        };
+    pub const Error = error{
+        MissingPath,
+    } || std.fs.Dir.RealPathError || codec.PrimitiveCodec.Error;
+
+    pub fn supports(comptime T: type, comptime _: anytype) bool {
+        return T == []const u8;
     }
+
+    pub fn parseByType(
+        self: *@This(),
+        comptime T: type,
+        tag: anytype,
+        allc: *const std.mem.Allocator,
+        cursor: *Cursor([]const u8),
+    ) Error!T {
+        if (T == []const u8) {
+            const path = cursor.next() orelse return Error.MissingPath;
+            return try std.fs.cwd().realpath(path, &self.pathBuff);
+        } else {
+            return codec.PrimitiveCodec.parseByType(self, T, tag, allc, cursor);
+        }
+    }
+};
+
+// TODO: move to args parser help
+pub fn enumValueHint(target: type) []const u8 {
+    return comptime rv: {
+        var b = coll.ComptSb.init("{ ");
+        const fields = @typeInfo(target).@"enum".fields;
+        for (fields, 0..) |field, i| {
+            b.append(field.name);
+            if (i + 1 < fields.len) b.append(", ");
+        }
+        b.append(" }");
+        break :rv b.s;
+    };
+}
+
+pub fn AdlerCmd(adlerType: adler.AdlerType) type {
+    return struct {
+        pub fn hasher() type {
+            return adler.AdlerHash(adlerType);
+        }
+
+        pub const Positionals = PositionalOf(.{
+            .TupleType = void,
+            .ReminderType = void,
+        });
+
+        pub const Help: HelpData(@This()) = .{
+            .usage = &.{"flechette <iotype> " ++ @tagName(adlerType) ++ " <file>"},
+            .shortDescription = "Runs " ++ @tagName(adlerType) ++ " hashing algorithm on file",
+            .description = "Runs " ++ @tagName(adlerType) ++ " hashing algorithm on file",
+            .examples = &.{
+                "flechette mmap " ++ @tagName(adlerType) ++ " random_250mb.bin",
+                "flechette buffered " ++ @tagName(adlerType) ++ " random_1gb.bin",
+            },
+        };
+
+        pub const HelpFmt = args.help.HelpFmt(@This(), .{ .simpleTypes = true, .optionsBreakline = true });
+    };
+}
+
+pub const FadlerCmd = struct {
+    pub fn hasher() type {
+        return fadler;
+    }
+
+    pub const Positionals = PositionalOf(.{
+        .TupleType = struct { fadler.FadlerFlavour },
+        .ReminderType = void,
+    });
+
+    pub const Help: HelpData(@This()) = .{
+        .usage = &.{"flechette <iotype> fadler <fladerFlavour> <file>"},
+        .shortDescription = "Runs flader hashing algorithm on file",
+        .description = "Runs flader hashing algorithm on file",
+        .examples = &.{
+            "flechette mmap fadler hdiff random_1gb.bin",
+            "flechette buffered fadler scalar16 random_1gb.bin",
+        },
+        .positionalsDescription = .{
+            .tuple = &.{
+                "Which fadler flavour to run. Supported values: " ++ enumValueHint(fadler.FadlerFlavour),
+            },
+        },
+    };
+
+    pub const HelpFmt = args.help.HelpFmt(@This(), .{ .simpleTypes = true, .optionsBreakline = true });
 };
 
 pub const Args = struct {
     pub const Positionals = PositionalOf(.{
+        .CodecType = PathCodec,
         .TupleType = struct {
             IOFlavour,
-            AdlerType,
             []const u8,
         },
         .ReminderType = void,
     });
 
+    pub const Verb = union(enum) {
+        adler32: AdlerCmd(.adler32),
+        adler64: AdlerCmd(.adler64),
+        fadler: FadlerCmd,
+    };
+
     pub const Help: HelpData(@This()) = .{
-        .usage = &.{"flechette <iotype> <adlertype> <file>"},
+        .usage = &.{"flechette <iotype> <command> <file>"},
         .description = "Cli to run hashing algorithms on a file treated as binary",
         .examples = &.{
-            "flechette mmap adler32 random_1kb.bin",
-            "flechette mmap adler64 random_250mb.bin",
-            "flechette buffered adler32 random_32gb.bin",
-            "flechette buffered adler64 random_250gb.bin",
+            "flechette mmap adler64 random_1gb.bin",
+            "flechette buffered adler32 random_1gb.bin",
+            "flechette mmap fadler hdiff random_1gb.bin",
         },
         .positionalsDescription = .{
             .tuple = &.{
-                "IOFlavour to use to read the binary",
-                "Hashing algorith to use",
+                "IOFlavour to use to read the binary. Supported values: " ++ enumValueHint(IOFlavour),
                 "file path (relative)",
             },
         },
     };
 
-    pub const HelpFmt = args.help.HelpFmt(
-        Args,
-        .{ .simpleTypes = true, .optionsBreakline = true },
-    );
+    pub const GroupMatch: args.validate.GroupMatchConfig(@This()) = .{
+        .mandatoryVerb = true,
+    };
+
+    pub const HelpFmt = args.help.HelpFmt(@This(), .{ .simpleTypes = true, .optionsBreakline = true });
 };
+
+const Res = SpecResponse(Args);
 
 pub fn main() !u8 {
     var sfba = std.heap.stackFallback(4098, std.heap.page_allocator);
@@ -276,23 +300,15 @@ pub fn main() !u8 {
     var stderrW = std.fs.File.stderr().writer(&buff);
     var w = &stderrW.interface;
 
-    var res: SpecResponse(Args) = .init(allocator);
-    res.parseArgs() catch |E| {
-        try w.writeAll(Args.HelpFmt.helpForErr(@TypeOf(res).Error, E, "Failed with reason: "));
+    var res: Res = .init(allocator);
+    if (res.parseArgs()) |parseError| {
+        try w.writeAll(parseError.message orelse "");
         try w.flush();
         return 1;
-    };
-
-    const ioType, const adlerType, const path = res.positionals.tuple;
-
-    inline for (std.meta.fields(AdlerType)) |field| {
-        if (std.mem.eql(u8, field.name, @tagName(adlerType))) {
-            try ioType.run(w, @enumFromInt(field.value), path);
-            break;
-        }
-    } else {
-        @panic("Adler hash type not found");
     }
+
+    const ioFlavour: IOFlavour, const path = res.positionals.tuple;
+    try ioFlavour.run(&res.verb.?, w, path);
 
     return 0;
 }
