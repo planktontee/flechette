@@ -1,13 +1,13 @@
 .{
-    .name = .zig_adler64,
+    .name = .flechette,
     .version = "0.0.1",
     .dependencies = .{
         .zpec = .{
-            .url = "git+https://github.com/planktontee/seeksub?ref=master#74dec0b12a59247db0272736134a78b8927e4cb9",
-            .hash = "seeksub-0.0.0-kHveaW0MAwD5ZKZ1w9SvnrBmEc7S1poAc9INun1m2KeL",
+            .url = "git+https://github.com/planktontee/seeksub?ref=master#1e3894e24971842f8bb13559e869546b0cea4282",
+            .hash = "seeksub-0.0.0-kHveacYOAwDImLcGAKMPr4hdYlY1bHzTAXKMfTLqBGv6",
         },
     },
     .minimum_zig_version = "0.15.1",
     .paths = .{""},
-    .fingerprint = 0xffbfd7b8529bb427,
+    .fingerprint = 0x991395d6f8d7c837,
 }

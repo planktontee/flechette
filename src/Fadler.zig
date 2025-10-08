@@ -1,6 +1,6 @@
 hash: u64 = 1,
 firstRun: bool = true,
-flavour: FadlerFlavour,
+flavour: ExecutionFlavour,
 
 const fadler64Table: *const [256]u32 = &.{
     0xb5e6a199, 0xe9834671, 0x8c715a7f, 0x0914fc22, 0x62abb5af, 0x9d31fb39, 0x69f00344, 0xa3d3c035,
@@ -240,7 +240,7 @@ pub fn roll(self: *@This(), data: []const u8) void {
     }
 }
 
-pub const FadlerFlavour = enum {
+pub const ExecutionFlavour = enum {
     hdiff,
     scalar,
     scalar2,
