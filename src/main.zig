@@ -50,6 +50,38 @@ pub fn ioWithMmap(T: type, hasher: *T, argsRes: *const ArgsResponse) !void {
     );
 }
 
+pub fn ioHeap(T: type, hasher: *T, argsRes: *const ArgsResponse) !void {
+    const path = argsRes.positionals.tuple.@"1";
+
+    var totalTimer = try std.time.Timer.start();
+
+    const f = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+    const fstat = try f.stat();
+    const fileSize = fstat.size;
+
+    var chunkTimer = try std.time.Timer.start();
+    const buff = try std.heap.page_allocator.alloc(u8, fileSize);
+    defer std.heap.page_allocator.free(buff);
+    const chunk = try f.readAll(buff);
+
+    const ioElapsed = chunkTimer.read();
+
+    chunkTimer.reset();
+    hasher.roll(buff[0..chunk]);
+    const hasherElapsed = chunkTimer.read();
+
+    try printReport(
+        argsRes,
+        hasher.hash,
+        1,
+        totalTimer.read(),
+        hasherElapsed,
+        ioElapsed,
+        fileSize,
+        chunk,
+    );
+}
+
 pub fn ioWithBuffer(T: type, hasher: *T, argsRes: *const ArgsResponse) !void {
     const path = argsRes.positionals.tuple.@"1";
 
@@ -186,6 +218,7 @@ fn printReport(
 pub const IOFlavour = enum {
     mmap,
     buffered,
+    heap,
 
     pub fn run(
         self: *const IOFlavour,
@@ -207,8 +240,8 @@ pub const IOFlavour = enum {
 
                 return switch (self.*) {
                     .mmap => try ioWithMmap(HasherT, &hasher, argsRes),
-                    // .mmap => try ioWithMmap(HasherT, &hasher, argsRes),
                     .buffered => try ioWithBuffer(HasherT, &hasher, argsRes),
+                    .heap => try ioHeap(HasherT, &hasher, argsRes),
                 };
             }
         } else {
