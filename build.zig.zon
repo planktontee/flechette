@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .zpec = .{
-            .url = "git+https://github.com/planktontee/seeksub?ref=master#1e3894e24971842f8bb13559e869546b0cea4282",
-            .hash = "seeksub-0.0.0-kHveacYOAwDImLcGAKMPr4hdYlY1bHzTAXKMfTLqBGv6",
+            .url = "git+https://github.com/planktontee/seeksub?ref=master#237d0e92bcb192de75a8e3a1f8e774eb4913bc2f",
+            .hash = "seeksub-0.0.0-kHveaeAwAwCL1b2j7ha90AFDEUKUFNxvF-cYZboEiIVG",
         },
     },
     .minimum_zig_version = "0.15.1",

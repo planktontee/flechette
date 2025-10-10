@@ -6,7 +6,6 @@ const spec = args.spec;
 const codec = zpec.args.codec;
 const positionals = args.positionals;
 const HelpData = args.help.HelpData;
-const SpecResponse = spec.SpecResponse;
 const Cursor = coll.Cursor;
 const AsCursor = zpec.collections.AsCursor;
 const adler = @import("adler.zig");
@@ -279,10 +278,6 @@ pub const PathCodec = struct {
     }
 };
 
-pub fn HelpFormatter(T: type) type {
-    return args.help.HelpFmt(T, .{ .simpleTypes = true });
-}
-
 pub fn AdlerCmd(adlerType: adler.AdlerType) type {
     return struct {
         pub const HashT = adler.AdlerHash(adlerType);
@@ -299,7 +294,9 @@ pub fn AdlerCmd(adlerType: adler.AdlerType) type {
             },
         };
 
-        pub const HelpFmt = HelpFormatter(@This());
+        pub const GroupMatch: args.validate.GroupMatchConfig(@This()) = .{
+            .ensureCursorDone = false,
+        };
     };
 }
 
@@ -326,7 +323,9 @@ pub const Fadler64Cmd = struct {
         },
     };
 
-    pub const HelpFmt = HelpFormatter(@This());
+    pub const GroupMatch: args.validate.GroupMatchConfig(@This()) = .{
+        .ensureCursorDone = false,
+    };
 };
 
 pub const Args = struct {
@@ -360,7 +359,12 @@ pub const Args = struct {
     pub const Help: HelpData(@This()) = .{
         .usage = &.{"flechette <ioType> <command> <file>"},
         .description = "Cli to run hashing algorithms on a file treated as binary",
-        .examples = &.{ "Result only: flechette mmap adler64 r1gb.bin", "Benchmark hash: flechette -b buffered adler32 r1gb.bin", "Benchmark IO: flechette -ib buffered fadler64 scalar r1gb.bin", "TIP: run any command with --help and it will fail and show help" },
+        .examples = &.{
+            "Result only: flechette mmap adler64 r1gb.bin",
+            "Benchmark hash: flechette -b buffered adler32 r1gb.bin",
+            "Benchmark IO: flechette -ib buffered fadler64 scalar r1gb.bin",
+            "TIP: run any command with --help and it will fail and show help",
+        },
         .positionalsDescription = .{
             .tuple = &.{
                 "IOFlavour to use to read the binary. Supported values: " ++ args.help.enumValueHint(IOFlavour),
@@ -378,11 +382,12 @@ pub const Args = struct {
     pub const GroupMatch: args.validate.GroupMatchConfig(@This()) = .{
         .mandatoryVerb = true,
     };
-
-    pub const HelpFmt = HelpFormatter(@This());
 };
 
-const ArgsResponse = SpecResponse(Args);
+const ArgsResponse = spec.SpecResponseWithConfig(Args, args.help.HelpConf{
+    .backwardsBranchesQuote = 1000000,
+    .simpleTypes = true,
+}, true);
 
 const Reporter = struct {
     stdoutW: *std.Io.Writer = undefined,
@@ -415,6 +420,7 @@ pub fn main() !u8 {
     var timer = try std.time.Timer.start();
     var argsRes: ArgsResponse = .init(allocator);
     if (argsRes.parseArgs()) |parseError| {
+        try reporter.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{ parseError.lastOpt, parseError.lastToken });
         try reporter.stderrW.writeAll(parseError.message orelse unreachable);
         try reporter.stderrW.flush();
         return 1;
