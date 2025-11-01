@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
 
     const exe = b.addExecutable(.{
-        .name = "seeksub",
+        .name = "flechette",
         .root_module = module,
         .use_llvm = true,
     });

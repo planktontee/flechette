@@ -10,6 +10,7 @@ const Cursor = coll.Cursor;
 const AsCursor = coll.AsCursor;
 const adler = @import("flechette/adler.zig");
 const Fadler = @import("flechette/Fadler.zig");
+const crc32 = @import("flechette/crc32.zig");
 
 pub fn ioWithMmap(T: type, hasher: *T, argsRes: *const ArgsResponse) !void {
     const path = argsRes.positionals.tuple.@"1";
@@ -106,14 +107,16 @@ pub fn ioWithBuffer(T: type, hasher: *T, argsRes: *const ArgsResponse) !void {
     var ioElapsed: u64 = 0;
     while (true) {
         chunkTimer.reset();
-        const slice = reader.interface.take(1) catch |e| switch (e) {
+        const slice = reader.interface.peekGreedy(1) catch |e| switch (e) {
             error.EndOfStream => rv: {
                 const eosChunk = reader.interface.buffered();
                 if (eosChunk.len == 0) break;
+                reader.interface.tossBuffered();
                 break :rv eosChunk;
             },
             error.ReadFailed => return e,
         };
+        reader.interface.tossBuffered();
         bytesProcessed += slice.len;
         chunkIndex += 1;
         ioElapsed += chunkTimer.read();
@@ -233,11 +236,10 @@ pub const IOFlavour = enum {
             if (std.mem.eql(u8, uField.name, @tagName(verb))) {
                 const HasherT = uField.type.HashT;
                 var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(eField.value))) {
-                    .adler32 => .{},
-                    .adler64 => .{},
                     .fadler64 => .{
                         .flavour = verb.fadler64.positionals.tuple.@"0",
                     },
+                    inline else => .{},
                 };
 
                 return switch (self.*) {
@@ -331,6 +333,25 @@ pub const Fadler64Cmd = struct {
     };
 };
 
+pub const Crc32Cmd = struct {
+    pub const HashT = crc32.Wrapper;
+
+    pub const Positionals = positionals.EmptyPositionalsOf;
+
+    pub const Help: HelpData(@This()) = .{
+        .usage = &.{"flechette <ioType> crc32 <file>"},
+        .shortDescription = "Runs crc32 hashing algorithm on file",
+        .description = "Runs crc32 hashing algorithm on file",
+        .examples = &.{
+            "flechette mmap crc32 r1gb.bin",
+        },
+    };
+
+    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
+        .ensureCursorDone = false,
+    };
+};
+
 pub const Args = struct {
     benchmark: bool = false,
     @"io-benchmark": bool = false,
@@ -357,6 +378,7 @@ pub const Args = struct {
         adler32: AdlerCmd(.adler32),
         adler64: AdlerCmd(.adler64),
         fadler64: Fadler64Cmd,
+        crc32: Crc32Cmd,
     };
 
     pub const Help: HelpData(@This()) = .{
