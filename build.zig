@@ -4,26 +4,36 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
-        .name = "flechette",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    exe.root_module.addImport("zpec", b.dependency("zpec", .{
+    const module = b.addModule("flechette", .{
+        .root_source_file = b.path("flechette.zig"),
         .target = target,
         .optimize = optimize,
-    }).module("zpec"));
+    });
+    module.addImport("regent", b.dependency("regent", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("regent"));
+    module.addImport("zcasp", b.dependency("zcasp", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("zcasp"));
 
+    const unit_tests = b.addTest(.{
+        .root_module = module,
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_unit_tests.step);
+
+    const exe = b.addExecutable(.{
+        .name = "seeksub",
+        .root_module = module,
+        .use_llvm = true,
+    });
     b.installArtifact(exe);
 
-    const run_step = b.step("run", "Run the app");
-
     const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
 
     run_cmd.step.dependOn(b.getInstallStep());
 
@@ -31,12 +41,6 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
-
-    const run_exe_tests = b.addRunArtifact(exe_tests);
-
-    const test_step = b.step("test", "Run tests");
-    test_step.dependOn(&run_exe_tests.step);
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
 }

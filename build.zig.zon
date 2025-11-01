@@ -2,12 +2,21 @@
     .name = .flechette,
     .version = "0.0.1",
     .dependencies = .{
-        .zpec = .{
-            .url = "git+https://github.com/planktontee/seeksub?ref=master#237d0e92bcb192de75a8e3a1f8e774eb4913bc2f",
-            .hash = "seeksub-0.0.0-kHveaeAwAwCL1b2j7ha90AFDEUKUFNxvF-cYZboEiIVG",
+        .zcasp = .{
+            .url = "file:////home/t/repos/zcasp/zcasp.zip",
+            .hash = "zcasp-0.0.1-iIb82DwhAwDCrVE5eg-A_u3Ga7QjzANU2OE7jcv76FJt",
+        },
+        .regent = .{
+            .url = "file:///home/t/repos/regent/regent.zip",
+            .hash = "regent-0.0.1-zgdbw-cuAAAqyrK_MdAT1upi5_SvkOAJuE4L7ctd4xyn",
         },
     },
-    .minimum_zig_version = "0.15.1",
-    .paths = .{""},
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "flechette",
+        "flechette.zig",
+    },
     .fingerprint = 0x991395d6f8d7c837,
 }
