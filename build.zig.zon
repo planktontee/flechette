@@ -3,8 +3,8 @@
     .version = "0.0.1",
     .dependencies = .{
         .zcasp = .{
-            .url = "git+https://github.com/planktontee/zcasp/#42a4f154293736546ce83b4bc4142e1ea1d2558e",
-            .hash = "zcasp-0.0.1-iIb82GkhAwAimsNZdUKt3IErK7O-UpgihzpWoWtdPtaU",
+            .url = "git+https://github.com/planktontee/zcasp/#85faa702ad7061204443860ba11c447378d85b4d",
+            .hash = "zcasp-0.0.1-iIb82JAzAwCiHaaf3SYyem3IXtzLmM8xt_LhBdE9UgzV",
         },
         .regent = .{
             .url = "git+https://github.com/planktontee/regent/#7f8925233a23405a9529416e6dadee1c5fd7c953",
