@@ -14,11 +14,7 @@ const crc32 = @import("flechette/crc32.zig");
 const Md5 = @import("flechette/md5.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
-const c = @cImport({
-    @cDefine("_GNU_SOURCE", "");
-    @cDefine("_FILE_OFFSET_BITS", "64");
-    @cInclude("fcntl.h");
-});
+const c = @import("flechette/c.zig").c;
 
 pub fn dispatch(
     T: type,
@@ -28,11 +24,6 @@ pub fn dispatch(
     var totalTimer = try std.time.Timer.start();
 
     var hasher = request.hasher;
-
-    const f = request.file;
-    const fstat = try f.stat();
-    const fileSize = fstat.size;
-
     var reader = request.reader;
 
     var chunkIndex: usize = 0;
@@ -70,7 +61,7 @@ pub fn dispatch(
         .elapsed = totalElapsed,
         .hasherElapsed = hasherElapsed,
         .ioElapsed = ioElapsed,
-        .fileSize = fileSize,
+        .fileSize = result.fileSize,
         .bytesProcessed = bytesProcessed,
     };
 
@@ -138,12 +129,12 @@ pub fn HashResult(T: type) type {
             } else if (TInfo == .array) {
                 var hexBuf: [TInfo.array.len * 2]u8 = undefined;
                 var hexW: std.Io.Writer = .fixed(&hexBuf);
-                try hexW.print("{x}", .{self.hash});
-
-                hashStr = if (upcase)
-                    std.ascii.upperString(&hexBuf, &hexBuf)
+                if (upcase)
+                    try hexW.print("{X}", .{self.hash})
                 else
-                    &hexBuf;
+                    try hexW.print("{x}", .{self.hash});
+
+                hashStr = &hexBuf;
             } else @compileError("Invalid hash type: " ++ @typeName(T));
 
             var vecBuff: [2][]const u8 = .{
@@ -237,6 +228,7 @@ pub const IOFlavour = union(enum) {
             if (std.mem.eql(u8, uField.name, @tagName(verb))) {
                 const HasherT = uField.type.HashT;
                 var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(eField.value))) {
+                    .md5 => .init(),
                     .fadler64 => .{
                         .flavour = verb.fadler64.positionals.tuple.@"0",
                     },
@@ -255,6 +247,7 @@ pub const IOFlavour = union(enum) {
 
                         const stat = try file.stat();
                         const fileSize = stat.size;
+                        result.fileSize = fileSize;
 
                         const ptr = try std.posix.mmap(
                             null,
@@ -281,12 +274,6 @@ pub const IOFlavour = union(enum) {
                             0,
                             @bitCast(fileSize),
                             c.POSIX_FADV_NOREUSE,
-                        );
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_DONTNEED,
                         );
 
                         var reader: std.Io.Reader = .fixed(ptr);
@@ -322,6 +309,7 @@ pub const IOFlavour = union(enum) {
 
                                 const stat = try file.stat();
                                 const fileSize = stat.size;
+                                result.fileSize = fileSize;
                                 _ = std.os.linux.fadvise(
                                     file.handle,
                                     0,
@@ -333,12 +321,6 @@ pub const IOFlavour = union(enum) {
                                     0,
                                     @bitCast(fileSize),
                                     c.POSIX_FADV_NOREUSE,
-                                );
-                                _ = std.os.linux.fadvise(
-                                    file.handle,
-                                    0,
-                                    @bitCast(fileSize),
-                                    c.POSIX_FADV_DONTNEED,
                                 );
 
                                 var fReader = file.reader(buff);
@@ -365,11 +347,18 @@ pub const IOFlavour = union(enum) {
 
                         const stat = try file.stat();
                         const fileSize = stat.size;
+                        result.fileSize = fileSize;
                         _ = std.os.linux.fadvise(
                             file.handle,
                             0,
                             @bitCast(fileSize),
                             c.POSIX_FADV_SEQUENTIAL,
+                        );
+                        _ = std.os.linux.fadvise(
+                            file.handle,
+                            0,
+                            @bitCast(fileSize),
+                            c.POSIX_FADV_DONTNEED,
                         );
 
                         var fReader = file.reader(buff);
@@ -391,6 +380,7 @@ pub const IOFlavour = union(enum) {
 
                         const stat = try file.stat();
                         const fileSize = stat.size;
+                        result.fileSize = fileSize;
                         _ = std.os.linux.fadvise(
                             file.handle,
                             0,
@@ -657,11 +647,11 @@ pub fn main() !u8 {
         var buffErr: [4098]u8 = undefined;
 
         r.stdoutW = rOut: {
-            var writer = std.fs.File.stdout().writer(&buffOut);
+            var writer = std.fs.File.stdout().writerStreaming(&buffOut);
             break :rOut &writer.interface;
         };
         r.stderrW = rErr: {
-            var writer = std.fs.File.stderr().writer(&buffErr);
+            var writer = std.fs.File.stderr().writerStreaming(&buffErr);
             break :rErr &writer.interface;
         };
 

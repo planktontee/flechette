@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }).module("zcasp"));
+    module.linkSystemLibrary("crypto", .{});
 
     const unit_tests = b.addTest(.{
         .root_module = module,
