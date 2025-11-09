@@ -35,7 +35,8 @@ pub fn AdlerHash(comptime adlerType: AdlerType) type {
     const RBits = Mask - Base + 1;
 
     return struct {
-        hash: T = 1,
+        pub const R = T;
+        result: T = 1,
         // Stolen from a zig branch optimizing adler32 and then changed to work with adler64
         // https://github.com/ziglang/zig/blob/b27e2ab0afde4aee9d8bc704a05946117ea36a38/lib/std/hash/Adler32.zig
         fn innerDigest(data: []const u8, a: T, b: T) T {
@@ -87,7 +88,11 @@ pub fn AdlerHash(comptime adlerType: AdlerType) type {
 
         pub fn roll(self: *@This(), data: []const u8) void {
             // TODO: add option to combine
-            self.hash = innerDigest(data, self.hash & Mask, (self.hash >> Shift) & Mask);
+            self.result = innerDigest(data, self.result & Mask, (self.result >> Shift) & Mask);
+        }
+
+        pub fn final(self: *const @This()) T {
+            return self.result;
         }
     };
 }

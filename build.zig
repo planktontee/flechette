@@ -8,6 +8,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("flechette.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     module.addImport("regent", b.dependency("regent", .{
         .target = target,
@@ -20,6 +21,7 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests = b.addTest(.{
         .root_module = module,
+        .use_llvm = true,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
 

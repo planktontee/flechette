@@ -219,9 +219,15 @@ fn crc32(crc: u32, input: []const u8) u32 {
 
 // Wrapper around the accelerated implementation to match the one in impl.zig.
 pub const Wrapper = struct {
-    hash: u32 = 0,
+    result: R = 0,
 
-    pub fn roll(w: *Wrapper, bytes: []const u8) void {
-        w.hash = crc32(w.hash, bytes);
+    pub const R = u32;
+
+    pub fn roll(self: *Wrapper, bytes: []const u8) void {
+        self.result = crc32(self.result, bytes);
+    }
+
+    pub fn final(self: *const Wrapper) R {
+        return self.result;
     }
 };

@@ -1,6 +1,8 @@
-hash: u64 = 1,
+result: R = 1,
 firstRun: bool = true,
 flavour: ExecutionFlavour,
+
+pub const R = u64;
 
 const fadler64Table: *const [256]u32 = &.{
     0xb5e6a199, 0xe9834671, 0x8c715a7f, 0x0914fc22, 0x62abb5af, 0x9d31fb39, 0x69f00344, 0xa3d3c035,
@@ -222,22 +224,26 @@ pub fn roll(self: *@This(), data: []const u8) void {
 
     if (self.firstRun) {
         self.firstRun = false;
-        self.hash = newHash;
+        self.result = newHash;
     } else {
         @branchHint(.likely);
         // Combine defined here: https://github.com/sisong/HDiffPatch/blob/master/libHDiffPatch/HDiff/private_diff/limit_mem_diff/adler_roll.c#L357
         const rAdler = newHash;
         const rSum = newHash >> 32;
-        const lAdler = self.hash;
-        const lSum = self.hash >> 32;
+        const lAdler = self.result;
+        const lSum = self.result >> 32;
 
         const rlen = data.len;
         var sum = rlen * lAdler;
         const adler = lAdler + rAdler - 1;
         sum += lSum + rSum - rlen;
 
-        self.hash = (sum << 32) | (adler & 0xFFFFFFFF);
+        self.result = (sum << 32) | (adler & 0xFFFFFFFF);
     }
+}
+
+pub fn final(self: *const @This()) R {
+    return self.result;
 }
 
 pub const ExecutionFlavour = enum {
