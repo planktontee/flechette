@@ -12,6 +12,7 @@ const adler = @import("flechette/adler.zig");
 const Fadler = @import("flechette/Fadler.zig");
 const crc32 = @import("flechette/crc32.zig");
 const Md5 = @import("flechette/md5.zig");
+const Sha256 = @import("flechette/sha256.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
 const c = @import("flechette/c.zig").c;
@@ -95,6 +96,11 @@ pub const StackBuffLen = enum {
     @"2mb",
     @"4mb",
     @"8mb",
+    // We are fixing 8mb
+    @"16mb",
+    @"32mb",
+    @"64mb",
+    @"128mb",
 };
 
 pub fn HashRequest(HasherT: type) type {
@@ -228,7 +234,9 @@ pub const IOFlavour = union(enum) {
             if (std.mem.eql(u8, uField.name, @tagName(verb))) {
                 const HasherT = uField.type.HashT;
                 var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(eField.value))) {
-                    .md5 => .init(),
+                    .md5,
+                    .sha256,
+                    => .init(),
                     .fadler64 => .{
                         .flavour = verb.fadler64.positionals.tuple.@"0",
                     },
@@ -275,7 +283,6 @@ pub const IOFlavour = union(enum) {
                             @bitCast(fileSize),
                             c.POSIX_FADV_NOREUSE,
                         );
-
                         var reader: std.Io.Reader = .fixed(ptr);
 
                         request = .{
@@ -566,6 +573,25 @@ pub const Md5Cmd = struct {
     };
 };
 
+pub const Sha256Cmd = struct {
+    pub const HashT = Sha256;
+
+    pub const Positionals = positionals.EmptyPositionalsOf;
+
+    pub const Help: HelpData(@This()) = .{
+        .usage = &.{"flechette <ioType> sha256 <file>"},
+        .shortDescription = "Runs sha256 hashing algorithm on file",
+        .description = "Runs sha256 hashing algorithm on file",
+        .examples = &.{
+            "flechette mmap sha256 r1gb.bin",
+        },
+    };
+
+    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
+        .ensureCursorDone = false,
+    };
+};
+
 pub const Args = struct {
     benchmark: bool = false,
     @"io-benchmark": bool = false,
@@ -594,6 +620,7 @@ pub const Args = struct {
         fadler64: Fadler64Cmd,
         crc32: Crc32Cmd,
         md5: Md5Cmd,
+        sha256: Sha256Cmd,
     };
 
     pub const Help: HelpData(@This()) = .{

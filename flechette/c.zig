@@ -4,4 +4,5 @@ pub const c = @cImport({
     @cInclude("fcntl.h");
     @cInclude("stdlib.h");
     @cInclude("openssl/md5.h");
+    @cInclude("openssl/sha.h");
 });

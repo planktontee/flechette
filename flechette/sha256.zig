@@ -1,33 +1,33 @@
 const std = @import("std");
 const c = @import("c.zig").c;
 
-pub const R = [c.MD5_DIGEST_LENGTH]u8;
+pub const R = [c.SHA256_DIGEST_LENGTH]u8;
 
-ctx: c.MD5_CTX = undefined,
+ctx: c.SHA256_CTX = undefined,
 result: R = undefined,
 
 pub fn init() @This() {
     var self: @This() = .{};
-    if (c.MD5_Init(&self.ctx) == 0) {
+    if (c.SHA256_Init(&self.ctx) == 0) {
         @branchHint(.cold);
-        @panic("Failed to init MD5");
+        @panic("Failed to init SHA256");
     }
     return self;
 }
 
 pub fn final(self: *@This()) R {
     @setRuntimeSafety(false);
-    if (c.MD5_Final(&self.result, &self.ctx) == 0) {
+    if (c.SHA256_Final(&self.result, &self.ctx) == 0) {
         @branchHint(.cold);
-        @panic("Failed to finalize MD5");
+        @panic("Failed to finalize SHA256");
     }
     return self.result;
 }
 
 pub fn roll(self: *@This(), data: []const u8) void {
     @setRuntimeSafety(false);
-    if (c.MD5_Update(&self.ctx, @ptrCast(@alignCast(data.ptr)), data.len) == 0) {
+    if (c.SHA256_Update(&self.ctx, @ptrCast(@alignCast(data.ptr)), data.len) == 0) {
         @branchHint(.cold);
-        @panic("Failed to update MD5");
+        @panic("Failed to update SHA256");
     }
 }
