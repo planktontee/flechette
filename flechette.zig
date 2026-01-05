@@ -11,11 +11,10 @@ const AsCursor = coll.AsCursor;
 const adler = @import("flechette/adler.zig");
 const Fadler = @import("flechette/Fadler.zig");
 const crc32 = @import("flechette/crc32.zig");
-const Md5 = @import("flechette/md5.zig");
-const Sha256 = @import("flechette/sha256.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
 const c = @import("flechette/c.zig").c;
+const openssl = @import("flechette/openssl.zig");
 
 pub fn dispatch(
     T: type,
@@ -535,62 +534,26 @@ pub const Fadler64Cmd = struct {
     };
 };
 
-pub const Crc32Cmd = struct {
-    pub const HashT = crc32.Wrapper;
+pub fn BasicHashingCmd(_HashT: type, comptime name: []const u8) type {
+    return struct {
+        pub const HashT = _HashT;
 
-    pub const Positionals = positionals.EmptyPositionalsOf;
+        pub const Positionals = positionals.EmptyPositionalsOf;
 
-    pub const Help: HelpData(@This()) = .{
-        .usage = &.{"flechette <ioType> crc32 <file>"},
-        .shortDescription = "Runs crc32 hashing algorithm on file",
-        .description = "Runs crc32 hashing algorithm on file",
-        .examples = &.{
-            "flechette mmap crc32 r1gb.bin",
-        },
+        pub const Help: HelpData(@This()) = .{
+            .usage = &.{"flechette <ioType> " ++ name ++ " <file>"},
+            .shortDescription = "Runs " ++ name ++ " hashing algorithm on file",
+            .description = "Runs " ++ name ++ " hashing algorithm on file",
+            .examples = &.{
+                "flechette mmap " ++ name ++ " r1gb.bin",
+            },
+        };
+
+        pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
+            .ensureCursorDone = false,
+        };
     };
-
-    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
-        .ensureCursorDone = false,
-    };
-};
-
-pub const Md5Cmd = struct {
-    pub const HashT = Md5;
-
-    pub const Positionals = positionals.EmptyPositionalsOf;
-
-    pub const Help: HelpData(@This()) = .{
-        .usage = &.{"flechette <ioType> md5 <file>"},
-        .shortDescription = "Runs md5 hashing algorithm on file",
-        .description = "Runs md5 hashing algorithm on file",
-        .examples = &.{
-            "flechette mmap md5 r1gb.bin",
-        },
-    };
-
-    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
-        .ensureCursorDone = false,
-    };
-};
-
-pub const Sha256Cmd = struct {
-    pub const HashT = Sha256;
-
-    pub const Positionals = positionals.EmptyPositionalsOf;
-
-    pub const Help: HelpData(@This()) = .{
-        .usage = &.{"flechette <ioType> sha256 <file>"},
-        .shortDescription = "Runs sha256 hashing algorithm on file",
-        .description = "Runs sha256 hashing algorithm on file",
-        .examples = &.{
-            "flechette mmap sha256 r1gb.bin",
-        },
-    };
-
-    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
-        .ensureCursorDone = false,
-    };
-};
+}
 
 pub const Args = struct {
     benchmark: bool = false,
@@ -618,9 +581,9 @@ pub const Args = struct {
         adler32: AdlerCmd(.adler32),
         adler64: AdlerCmd(.adler64),
         fadler64: Fadler64Cmd,
-        crc32: Crc32Cmd,
-        md5: Md5Cmd,
-        sha256: Sha256Cmd,
+        crc32: BasicHashingCmd(crc32.Wrapper, "crc32"),
+        md5: BasicHashingCmd(openssl.MD5, "md5"),
+        sha256: BasicHashingCmd(openssl.SHA256, "sha256"),
     };
 
     pub const Help: HelpData(@This()) = .{
