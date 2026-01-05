@@ -212,6 +212,8 @@ pub const IOFlavour = union(enum) {
 
     const Error = error{
         InvalidStackSize,
+        DirectHasNoTargetFile,
+        MmapHasNoTargetFile,
     };
 
     pub fn run(
@@ -226,8 +228,6 @@ pub const IOFlavour = union(enum) {
         var sba = std.heap.FixedBufferAllocator.init(&stackAllocBuffer);
         const stackAllocator = sba.allocator();
         const heapAllocator = std.heap.page_allocator;
-
-        const path = argsRes.positionals.tuple.@"1";
 
         inline for (std.meta.fields(VerbEnum), std.meta.fields(Args.Verb)) |eField, uField| {
             if (std.mem.eql(u8, uField.name, @tagName(verb))) {
@@ -249,7 +249,13 @@ pub const IOFlavour = union(enum) {
 
                 switch (self.*) {
                     .mmap => {
-                        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+                        if (argsRes.positionals.reminder == null)
+                            return Error.MmapHasNoTargetFile;
+
+                        var file: std.fs.File = try std.fs.openFileAbsolute(
+                            argsRes.positionals.reminder.?[0],
+                            .{ .mode = .read_only },
+                        );
                         defer file.close();
 
                         const stat = try file.stat();
@@ -310,7 +316,12 @@ pub const IOFlavour = union(enum) {
                                 const buff = try stackAllocator.alloc(u8, bUnit.size());
                                 defer stackAllocator.free(buff);
 
-                                const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_only });
+                                var file: std.fs.File = undefined;
+                                if (argsRes.positionals.reminder) |paths| {
+                                    file = try std.fs.openFileAbsolute(paths[0], .{ .mode = .read_only });
+                                } else {
+                                    file = std.fs.File.stdin();
+                                }
                                 defer file.close();
 
                                 const stat = try file.stat();
@@ -346,9 +357,12 @@ pub const IOFlavour = union(enum) {
                         const buff = try heapAllocator.alloc(u8, bufferSize.size());
                         defer heapAllocator.free(buff);
 
-                        const file: std.fs.File = .{
-                            .handle = try std.posix.open(path, .{ .DIRECT = true }, 0),
-                        };
+                        var file: std.fs.File = undefined;
+                        if (argsRes.positionals.reminder) |paths| {
+                            file = try std.fs.openFileAbsolute(paths[0], .{ .mode = .read_only });
+                        } else {
+                            file = std.fs.File.stdin();
+                        }
                         defer file.close();
 
                         const stat = try file.stat();
@@ -379,8 +393,15 @@ pub const IOFlavour = union(enum) {
                         return try dispatch(HasherT, &request, &result);
                     },
                     .direct => {
+                        if (argsRes.positionals.reminder == null)
+                            return Error.DirectHasNoTargetFile;
+
                         const file: std.fs.File = .{
-                            .handle = try std.posix.open(path, .{ .DIRECT = true }, 0),
+                            .handle = try std.posix.open(
+                                argsRes.positionals.reminder.?[0],
+                                .{ .DIRECT = true },
+                                0,
+                            ),
                         };
                         defer file.close();
 
@@ -572,9 +593,7 @@ pub const Args = struct {
         .CodecType = PosCodec,
         .TupleType = struct {
             IOFlavour,
-            []const u8,
         },
-        .ReminderType = void,
     });
 
     pub const Verb = union(enum) {
@@ -602,8 +621,8 @@ pub const Args = struct {
                     zcasp.help.enumValueHint(IOFlavourEnum),
                     ". stack and heap need an extra positional argument with the size and optional unit. Example: 1mb, 256kb. Currently using heap with a good buffer for your driver is the best approach. It will use O_DIRECT. Stack/mmap seems to do better for smaller files.",
                 }).s,
-                "File path (can be relative)",
             },
+            .reminder = "File to hash, if nothing provided uses stdin.",
         },
         .optionsDescription = &.{
             .{ .field = .benchmark, .description = "Prints hash benchmark on stderr" },
