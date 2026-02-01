@@ -11,6 +11,7 @@ const AsCursor = coll.AsCursor;
 const adler = @import("flechette/adler.zig");
 const Fadler = @import("flechette/Fadler.zig");
 const crc32 = @import("flechette/crc32.zig");
+const xxh3 = @import("flechette/xxh3.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
 const c = @import("flechette/c.zig").c;
@@ -220,6 +221,8 @@ pub const IOFlavour = union(enum) {
         self: *const IOFlavour,
         argsRes: *const ArgsResponse,
     ) !void {
+        @setEvalBranchQuota(100000);
+
         const VerbEnum = @typeInfo(Args.Verb).@"union".tag_type.?;
         const verb = argsRes.verb.?;
         // This likely wont work on older systems, seele has the same problem and I still dont have a good solution
@@ -601,6 +604,7 @@ pub const Args = struct {
         adler64: AdlerCmd(.adler64),
         fadler64: Fadler64Cmd,
         crc32: BasicHashingCmd(crc32.Wrapper, "crc32"),
+        xxh3: BasicHashingCmd(xxh3, "xxh3"),
         md5: BasicHashingCmd(openssl.MD5, "md5"),
         sha256: BasicHashingCmd(openssl.SHA256, "sha256"),
     };
