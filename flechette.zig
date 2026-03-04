@@ -12,6 +12,8 @@ const adler = @import("flechette/adler.zig");
 const Fadler = @import("flechette/Fadler.zig");
 const crc32 = @import("flechette/crc32.zig");
 const xxh3 = @import("flechette/xxh3.zig");
+const aegis = @import("flechette/aegis.zig");
+const rapidhash = @import("flechette/rapidhash.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
 const c = @import("flechette/c.zig").c;
@@ -605,6 +607,8 @@ pub const Args = struct {
         fadler64: Fadler64Cmd,
         crc32: BasicHashingCmd(crc32.Wrapper, "crc32"),
         xxh3: BasicHashingCmd(xxh3, "xxh3"),
+        aegis128: BasicHashingCmd(aegis, "aegis"),
+        rapidhash: BasicHashingCmd(rapidhash, "rapidhash"),
         md5: BasicHashingCmd(openssl.MD5, "md5"),
         sha256: BasicHashingCmd(openssl.SHA256, "sha256"),
     };
