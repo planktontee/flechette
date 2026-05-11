@@ -24,7 +24,7 @@ pub fn dispatch(
     request: *HashRequest(T),
     result: *HashResult(T.R),
 ) !void {
-    var totalTimer = try std.time.Timer.start();
+    var totalTimer = std.Io.Clock.awake.now(io);
 
     var hasher = request.hasher;
     var reader = request.reader;
@@ -32,11 +32,11 @@ pub fn dispatch(
     var chunkIndex: usize = 0;
     var bytesProcessed: u64 = 0;
 
-    var chunkTimer = try std.time.Timer.start();
+    var chunkTimer: std.Io.Timestamp = undefined;
     var hasherElapsed: u64 = 0;
     var ioElapsed: u64 = 0;
     while (true) {
-        chunkTimer.reset();
+        chunkTimer = std.Io.Clock.awake.now(io);
         const slice = reader.peekGreedy(1) catch |e| switch (e) {
             error.EndOfStream => rv: {
                 const eosChunk = reader.buffered();
@@ -49,13 +49,13 @@ pub fn dispatch(
         reader.tossBuffered();
         bytesProcessed += slice.len;
         chunkIndex += 1;
-        ioElapsed += chunkTimer.read();
+        ioElapsed += @intCast(chunkTimer.untilNow(io, .awake).toNanoseconds());
 
-        chunkTimer.reset();
+        chunkTimer = std.Io.Clock.awake.now(io);
         hasher.roll(slice);
-        hasherElapsed += chunkTimer.read();
+        hasherElapsed += @intCast(chunkTimer.untilNow(io, .awake).toNanoseconds());
     }
-    const totalElapsed = totalTimer.read();
+    const totalElapsed: u64 = @intCast(totalTimer.untilNow(io, .awake).toNanoseconds());
 
     result.* = .{
         .argsRes = result.argsRes,
@@ -107,7 +107,7 @@ pub const StackBuffLen = enum {
 
 pub fn HashRequest(HasherT: type) type {
     return struct {
-        file: std.fs.File,
+        file: std.Io.File,
         reader: *std.Io.Reader,
         hasher: *HasherT,
     };
@@ -257,20 +257,21 @@ pub const IOFlavour = union(enum) {
                         if (argsRes.positionals.reminder == null)
                             return Error.MmapHasNoTargetFile;
 
-                        var file: std.fs.File = try std.fs.openFileAbsolute(
+                        var file: std.Io.File = try std.Io.Dir.openFileAbsolute(
+                            io,
                             argsRes.positionals.reminder.?[0],
                             .{ .mode = .read_only },
                         );
-                        defer file.close();
+                        defer file.close(io);
 
-                        const stat = try file.stat();
+                        const stat = try file.stat(io);
                         const fileSize = stat.size;
                         result.fileSize = fileSize;
 
                         const ptr = try std.posix.mmap(
                             null,
                             fileSize,
-                            std.posix.PROT.READ,
+                            .{ .READ = true },
                             .{
                                 .TYPE = .PRIVATE,
                                 .NONBLOCK = true,
@@ -321,15 +322,15 @@ pub const IOFlavour = union(enum) {
                                 const buff = try stackAllocator.alloc(u8, bUnit.size());
                                 defer stackAllocator.free(buff);
 
-                                var file: std.fs.File = undefined;
+                                var file: std.Io.File = undefined;
                                 if (argsRes.positionals.reminder) |paths| {
-                                    file = try std.fs.openFileAbsolute(paths[0], .{ .mode = .read_only });
+                                    file = try std.Io.Dir.openFileAbsolute(io, paths[0], .{ .mode = .read_only });
                                 } else {
-                                    file = std.fs.File.stdin();
+                                    file = std.Io.File.stdin();
                                 }
-                                defer file.close();
+                                defer file.close(io);
 
-                                const stat = try file.stat();
+                                const stat = try file.stat(io);
                                 const fileSize = stat.size;
                                 result.fileSize = fileSize;
                                 _ = std.os.linux.fadvise(
@@ -345,7 +346,7 @@ pub const IOFlavour = union(enum) {
                                     c.POSIX_FADV_NOREUSE,
                                 );
 
-                                var fReader = file.reader(buff);
+                                var fReader = file.reader(io, buff);
                                 request = .{
                                     .file = file,
                                     .reader = &fReader.interface,
@@ -362,15 +363,15 @@ pub const IOFlavour = union(enum) {
                         const buff = try heapAllocator.alloc(u8, bufferSize.size());
                         defer heapAllocator.free(buff);
 
-                        var file: std.fs.File = undefined;
+                        var file: std.Io.File = undefined;
                         if (argsRes.positionals.reminder) |paths| {
-                            file = try std.fs.openFileAbsolute(paths[0], .{ .mode = .read_only });
+                            file = try std.Io.Dir.openFileAbsolute(io, paths[0], .{ .mode = .read_only });
                         } else {
-                            file = std.fs.File.stdin();
+                            file = std.Io.File.stdin();
                         }
-                        defer file.close();
+                        defer file.close(io);
 
-                        const stat = try file.stat();
+                        const stat = try file.stat(io);
                         const fileSize = stat.size;
                         result.fileSize = fileSize;
                         _ = std.os.linux.fadvise(
@@ -386,7 +387,7 @@ pub const IOFlavour = union(enum) {
                             c.POSIX_FADV_DONTNEED,
                         );
 
-                        var fReader = file.reader(buff);
+                        var fReader = file.reader(io, buff);
                         fReader.size = fileSize;
 
                         request = .{
@@ -401,16 +402,20 @@ pub const IOFlavour = union(enum) {
                         if (argsRes.positionals.reminder == null)
                             return Error.DirectHasNoTargetFile;
 
-                        const file: std.fs.File = .{
-                            .handle = try std.posix.open(
-                                argsRes.positionals.reminder.?[0],
-                                .{ .DIRECT = true },
-                                0,
-                            ),
-                        };
-                        defer file.close();
+                        const rc = std.posix.system.open(
+                            argsRes.positionals.reminder.?[0],
+                            .{ .DIRECT = true },
+                            @as(u32, 0),
+                        );
+                        if (rc < 0) return std.posix.unexpectedErrno(std.posix.errno(rc));
 
-                        const stat = try file.stat();
+                        const file: std.Io.File = .{
+                            .handle = rc,
+                            .flags = .{ .nonblocking = false },
+                        };
+                        defer file.close(io);
+
+                        const stat = try file.stat(io);
                         const fileSize = stat.size;
                         result.fileSize = fileSize;
                         _ = std.os.linux.fadvise(
@@ -429,7 +434,7 @@ pub const IOFlavour = union(enum) {
                         const buff = try heapAllocator.alloc(u8, fileSize);
                         defer heapAllocator.free(buff);
 
-                        var fReader = file.reader(buff);
+                        var fReader = file.reader(io, buff);
 
                         request = .{
                             .file = file,
@@ -452,7 +457,7 @@ pub const PosCodec = struct {
         MissingPath,
         MissingIOFlavourEnumArg,
         ZeroSize,
-    } || std.fs.Dir.RealPathError ||
+    } || std.Io.Dir.RealPathError ||
         codec.PrimitiveCodec.Error ||
         byteUnit.Error;
 
@@ -517,7 +522,7 @@ pub fn AdlerCmd(adlerType: adler.AdlerType) type {
         pub const Positionals = positionals.EmptyPositionalsOf;
 
         pub const Help: HelpData(@This()) = .{
-            .usage = &.{"flechette <ioType> " ++ @tagName(adlerType) ++ " <file>"},
+            .usage = &.{"flechette <ioFlavour> " ++ @tagName(adlerType) ++ " <file>"},
             .shortDescription = "Runs " ++ @tagName(adlerType) ++ " hashing algorithm on file",
             .description = "Runs " ++ @tagName(adlerType) ++ " hashing algorithm on file",
             .examples = &.{
@@ -541,7 +546,7 @@ pub const Fadler64Cmd = struct {
     });
 
     pub const Help: HelpData(@This()) = .{
-        .usage = &.{"flechette <ioType> fadler64 <executionFlavour> <file>"},
+        .usage = &.{"flechette <ioFlavour> fadler64 <executionFlavour> <file>"},
         .shortDescription = "Runs fadler64 hashing algorithm on file",
         .description = "Runs fadler64 hashing algorithm on file",
         .examples = &.{
@@ -567,7 +572,7 @@ pub fn BasicHashingCmd(_HashT: type, comptime name: []const u8) type {
         pub const Positionals = positionals.EmptyPositionalsOf;
 
         pub const Help: HelpData(@This()) = .{
-            .usage = &.{"flechette <ioType> " ++ name ++ " <file>"},
+            .usage = &.{"flechette <ioFlavour> " ++ name ++ " <file>"},
             .shortDescription = "Runs " ++ name ++ " hashing algorithm on file",
             .description = "Runs " ++ name ++ " hashing algorithm on file",
             .examples = &.{
@@ -599,6 +604,7 @@ pub const Args = struct {
         .TupleType = struct {
             IOFlavour,
         },
+        .ReminderType = ?[]const [:0]const u8,
     });
 
     pub const Verb = union(enum) {
@@ -656,19 +662,25 @@ const Reporter = struct {
 };
 
 var reporter: *const Reporter = undefined;
+var io: std.Io = undefined;
 
-pub fn main() !u8 {
+pub fn main(init: std.process.Init.Minimal) !u8 {
+    io = v: {
+        var i = std.Io.Threaded.init_single_threaded;
+        break :v i.io();
+    };
+
     reporter = rv: {
         var r: Reporter = .{};
         var buffOut: [256]u8 = undefined;
         var buffErr: [4098]u8 = undefined;
 
         r.stdoutW = rOut: {
-            var writer = std.fs.File.stdout().writerStreaming(&buffOut);
+            var writer = std.Io.File.stdout().writerStreaming(io, &buffOut);
             break :rOut &writer.interface;
         };
         r.stderrW = rErr: {
-            var writer = std.fs.File.stderr().writerStreaming(&buffErr);
+            var writer = std.Io.File.stderr().writerStreaming(io, &buffErr);
             break :rErr &writer.interface;
         };
 
@@ -679,11 +691,11 @@ pub fn main() !u8 {
     var sba = std.heap.FixedBufferAllocator.init(&stackAllocBuffer);
     const stackAllocator = sba.allocator();
 
-    var timer = try std.time.Timer.start();
+    var clock = std.Io.Clock.awake.now(io);
     var argsRes: ArgsResponse = .init(stackAllocator);
     defer argsRes.deinit();
 
-    if (argsRes.parseArgs()) |parseError| {
+    if (argsRes.parseArgs(init.args)) |parseError| {
         try reporter.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{ parseError.lastOpt, parseError.lastToken });
         try reporter.stderrW.writeAll(parseError.message orelse unreachable);
         try reporter.stderrW.flush();
@@ -693,7 +705,7 @@ pub fn main() !u8 {
     if (argsRes.options.@"args-benchmark") {
         try reporter.stderrW.print(
             "args parser: elapsed {d:.2}ns\n",
-            .{timer.read()},
+            .{clock.untilNow(io, .awake).toNanoseconds()},
         );
     }
 

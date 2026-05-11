@@ -3,15 +3,15 @@
     .version = "0.0.1",
     .dependencies = .{
         .zcasp = .{
-            .url = "git+https://github.com/planktontee/zcasp/#3c05d25a6887174087ea9eca6726a90b611b17d0",
-            .hash = "zcasp-0.0.1-iIb82LY3AwCUArT6csjJG7oxGfcxnod4QVyw786BffFl",
+            .url = "git+https://github.com/planktontee/zcasp.git#997d6f2c4a4efe45063e5da8aeb762e31d202aec",
+            .hash = "zcasp-0.0.1-iIb82KFQAwAMCmkyFhy-GfOagboPqAIxegUYbvS9l_eV",
         },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent/#7f8925233a23405a9529416e6dadee1c5fd7c953",
-            .hash = "regent-0.0.1-zgdbw-cuAAAqyrK_MdAT1upi5_SvkOAJuE4L7ctd4xyn",
+            .url = "git+https://github.com/planktontee/regent.git#edd61f590999adc4468ea1bd64a8fb87389bcc89",
+            .hash = "regent-0.0.1-zgdbw5M0AADMnI5YAFbqNkh9dCJ_sWOM7USTQrghPUxL",
         },
     },
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",
