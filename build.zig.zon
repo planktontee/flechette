@@ -3,12 +3,12 @@
     .version = "0.0.1",
     .dependencies = .{
         .zcasp = .{
-            .url = "git+https://github.com/planktontee/zcasp.git#997d6f2c4a4efe45063e5da8aeb762e31d202aec",
-            .hash = "zcasp-0.0.1-iIb82KFQAwAMCmkyFhy-GfOagboPqAIxegUYbvS9l_eV",
+            .url = "git+https://github.com/planktontee/zcasp.git#2301b33eea5da5ee7c6eabd0e9fbf797103e9d8a",
+            .hash = "zcasp-0.0.1-iIb82KFQAwC45Fn3D9tTQFt3f7v62oX4SnTVHix0jXMO",
         },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent.git#edd61f590999adc4468ea1bd64a8fb87389bcc89",
-            .hash = "regent-0.0.1-zgdbw5M0AADMnI5YAFbqNkh9dCJ_sWOM7USTQrghPUxL",
+            .url = "git+https://github.com/planktontee/regent.git#1d70dd4a70c30396739939fd7c54c61315e0bf25",
+            .hash = "regent-0.0.1-zgdbw3N1AADYgimyZ62lWnMwNV9-cM4S7H9TbLVyKQqD",
         },
     },
     .minimum_zig_version = "0.16.0",

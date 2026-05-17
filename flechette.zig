@@ -59,6 +59,8 @@ pub fn dispatch(
 
     result.* = .{
         .argsRes = result.argsRes,
+        .path = result.path,
+        .pad = result.pad,
         .hash = hasher.final(),
         .chunks = chunkIndex,
         .elapsed = totalElapsed,
@@ -71,40 +73,6 @@ pub fn dispatch(
     try result.print();
 }
 
-pub const IOFlavourEnum = @typeInfo(IOFlavour).@"union".tag_type.?;
-
-pub const StackBuffLen = enum {
-    @"1b",
-    @"2b",
-    @"4b",
-    @"8b",
-    @"16b",
-    @"32b",
-    @"64b",
-    @"128b",
-    @"256b",
-    @"512b",
-    @"1kb",
-    @"2kb",
-    @"4kb",
-    @"8kb",
-    @"16kb",
-    @"32kb",
-    @"64kb",
-    @"128kb",
-    @"256kb",
-    @"512kb",
-    @"1mb",
-    @"2mb",
-    @"4mb",
-    @"8mb",
-    // We are fixing 8mb
-    @"16mb",
-    @"32mb",
-    @"64mb",
-    @"128mb",
-};
-
 pub fn HashRequest(HasherT: type) type {
     return struct {
         file: std.Io.File,
@@ -116,6 +84,8 @@ pub fn HashRequest(HasherT: type) type {
 pub fn HashResult(T: type) type {
     return struct {
         argsRes: *const ArgsResponse,
+        path: []const u8,
+        pad: []const u8,
         hash: T,
         chunks: usize,
         elapsed: u64,
@@ -144,6 +114,14 @@ pub fn HashResult(T: type) type {
 
                 hashStr = &hexBuf;
             } else @compileError("Invalid hash type: " ++ @typeName(T));
+
+            if (self.argsRes.options.name) {
+                var vecBuff: [2][]const u8 = .{
+                    self.path,
+                    self.pad,
+                };
+                try reporter.stdoutW.writeVecAll(&vecBuff);
+            }
 
             var vecBuff: [2][]const u8 = .{
                 hashStr,
@@ -203,15 +181,18 @@ pub fn HashResult(T: type) type {
                     },
                 );
             }
+
+            try reporter.stderrW.flush();
+            try reporter.stdoutW.flush();
         }
     };
 }
 
 pub const IOFlavour = union(enum) {
     mmap,
-    stack: StackBuffLen,
-    heap: byteUnit.ByteUnit,
-    direct,
+    stack: ?byteUnit.ByteUnit,
+    heap: ?byteUnit.ByteUnit,
+    direct: ?byteUnit.ByteUnit,
 
     const Error = error{
         InvalidStackSize,
@@ -232,225 +213,129 @@ pub const IOFlavour = union(enum) {
         var stackAllocBuffer: [units.ByteUnit.mb * 8]u8 = undefined;
         var sba = std.heap.FixedBufferAllocator.init(&stackAllocBuffer);
         const stackAllocator = sba.allocator();
-        const heapAllocator = std.heap.page_allocator;
+        const stackContext: regent.ergo.Context = .{
+            .io = io,
+            .allocator = stackAllocator,
+        };
 
-        inline for (std.meta.fields(VerbEnum), std.meta.fields(Args.Verb)) |eField, uField| {
-            if (std.mem.eql(u8, uField.name, @tagName(verb))) {
-                const HasherT = uField.type.HashT;
-                var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(eField.value))) {
-                    .md5,
-                    .sha256,
-                    => .init(),
-                    .fadler64 => .{
-                        .flavour = verb.fadler64.positionals.tuple.@"0",
-                    },
-                    inline else => .{},
+        const pageContext: regent.ergo.Context = .{
+            .io = io,
+            .allocator = std.heap.page_allocator,
+        };
+
+        var emptyAllocBuffer = std.heap.FixedBufferAllocator.init(&.{});
+        const emptyAllocator = emptyAllocBuffer.allocator();
+        const emptyContext: regent.ergo.Context = .{
+            .io = io,
+            .allocator = emptyAllocator,
+        };
+
+        inline for (std.meta.fields(VerbEnum), std.meta.fields(Args.Verb)) |verbEField, verbUField| {
+            if (std.mem.eql(u8, verbUField.name, @tagName(verb))) {
+                const HasherT = verbUField.type.HashT;
+                const paths: []const []const u8 = if (argsRes.positionals.reminder) |reminder| reminder else &.{"-"};
+                const padSize: usize = rv: {
+                    var max: usize = 0;
+                    for (paths) |path| max = @max(max, path.len);
+                    break :rv max + 2;
                 };
 
-                var request: HashRequest(HasherT) = undefined;
-                var result: HashResult(HasherT.R) = undefined;
-
-                result.argsRes = argsRes;
-
-                switch (self.*) {
-                    .mmap => {
-                        if (argsRes.positionals.reminder == null)
-                            return Error.MmapHasNoTargetFile;
-
-                        var file: std.Io.File = try std.Io.Dir.openFileAbsolute(
-                            io,
-                            argsRes.positionals.reminder.?[0],
-                            .{ .mode = .read_only },
-                        );
-                        defer file.close(io);
-
-                        const stat = try file.stat(io);
-                        const fileSize = stat.size;
-                        result.fileSize = fileSize;
-
-                        const ptr = try std.posix.mmap(
-                            null,
-                            fileSize,
-                            .{ .READ = true },
-                            .{
-                                .TYPE = .PRIVATE,
-                                .NONBLOCK = true,
-                                .POPULATE = true,
-                            },
-                            file.handle,
-                            0,
-                        );
-                        defer std.posix.munmap(ptr);
-
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_SEQUENTIAL,
-                        );
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_NOREUSE,
-                        );
-                        var reader: std.Io.Reader = .fixed(ptr);
-
-                        request = .{
-                            .file = file,
-                            .reader = &reader,
-                            .hasher = &hasher,
+                inline for (std.meta.fields(IOFlavourEnum)) |ioEField| {
+                    if (std.mem.eql(u8, ioEField.name, @tagName(self.*))) {
+                        const context = switch (@as(IOFlavourEnum, @enumFromInt(ioEField.value))) {
+                            .mmap,
+                            => emptyContext,
+                            .stack,
+                            => stackContext,
+                            .heap,
+                            .direct,
+                            => pageContext,
                         };
 
-                        return try dispatch(HasherT, &request, &result);
-                    },
-                    // NOTE:
-                    // I tried readahead but it did nothing, fadv_noreuse seems to be the only thing
-                    // speeding up stack-based buffer io
-                    // O_DIRECT can't be used due to alignment issues
-                    .stack => |tagSize| {
-                        inline for (std.meta.fields(StackBuffLen)) |field| {
-                            if (std.mem.eql(u8, field.name, @tagName(tagSize))) {
-                                @setEvalBranchQuota(1000 * 10);
-                                const bUnit = comptime switch (@as(StackBuffLen, @enumFromInt(field.value))) {
-                                    // NOTE: this is a bit wasteful but only at comptime
-                                    inline else => |tag| byteUnit.parse(@tagName(tag)) catch @compileError(
-                                        std.fmt.comptimePrint("This failed: {s}\n", .{field.name}),
-                                    ),
+                        const openConfig: regent.io.OpenConfig = switch (@as(IOFlavourEnum, @enumFromInt(ioEField.value))) {
+                            .mmap,
+                            .stack,
+                            .heap,
+                            => .{ .mode = .read },
+                            .direct => .{
+                                .mode = .read,
+                                .extraOptions = .{ .oDirect = true },
+                            },
+                        };
+
+                        const bufferConfig: regent.io.BufferConfig = switch (self.*) {
+                            .mmap,
+                            => openConfig.bufferConfig(),
+                            inline else => |bUnit| if (bUnit) |b| .initSame(b.size()) else openConfig.bufferConfig(),
+                        };
+
+                        const bufferType: regent.io.BufferType = switch (self.*) {
+                            .mmap => .mmap,
+                            inline else => |bUnit| if (bUnit != null) .byte else .full,
+                        };
+
+                        var fileCursor: regent.io.FileCursor(openConfig) = .init(paths);
+                        while (fileCursor.hasNext()) {
+                            const path = fileCursor.peekPath().?;
+                            const pad = try stackAllocator.alloc(u8, padSize - path.len);
+                            defer stackAllocator.free(pad);
+                            @memset(pad, ' ');
+
+                            if (fileCursor.nextWithBuffConfig(context, bufferType, bufferConfig)) |optStream| {
+                                var stream = optStream.?;
+                                defer stream.close(context);
+
+                                stream.fadvise(.{
+                                    c.POSIX_FADV_SEQUENTIAL,
+                                    c.POSIX_FADV_NOREUSE,
+                                });
+
+                                var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(verbEField.value))) {
+                                    .md5,
+                                    .sha256,
+                                    => .init(),
+                                    .fadler64 => .{
+                                        .flavour = verb.fadler64.positionals.tuple.@"0",
+                                    },
+                                    inline else => .{},
                                 };
 
-                                const buff = try stackAllocator.alloc(u8, bUnit.size());
-                                defer stackAllocator.free(buff);
-
-                                var file: std.Io.File = undefined;
-                                if (argsRes.positionals.reminder) |paths| {
-                                    file = try std.Io.Dir.openFileAbsolute(io, paths[0], .{ .mode = .read_only });
-                                } else {
-                                    file = std.Io.File.stdin();
-                                }
-                                defer file.close(io);
-
-                                const stat = try file.stat(io);
-                                const fileSize = stat.size;
-                                result.fileSize = fileSize;
-                                _ = std.os.linux.fadvise(
-                                    file.handle,
-                                    0,
-                                    @bitCast(fileSize),
-                                    c.POSIX_FADV_SEQUENTIAL,
-                                );
-                                _ = std.os.linux.fadvise(
-                                    file.handle,
-                                    0,
-                                    @bitCast(fileSize),
-                                    c.POSIX_FADV_NOREUSE,
-                                );
-
-                                var fReader = file.reader(io, buff);
-                                request = .{
-                                    .file = file,
-                                    .reader = &fReader.interface,
+                                var request: HashRequest(HasherT) = .{
+                                    .file = stream.fileStream.file,
+                                    .reader = &stream.fileStream.interface,
                                     .hasher = &hasher,
                                 };
+                                var result: HashResult(HasherT.R) = undefined;
+                                result.argsRes = argsRes;
+                                result.path = path;
+                                result.pad = pad;
 
-                                return try dispatch(HasherT, &request, &result);
+                                dispatch(HasherT, &request, &result) catch |err| {
+                                    try reporter.stdoutW.print("{s}{s}Could not hash file - {s}\n", .{
+                                        path,
+                                        pad,
+                                        @errorName(err),
+                                    });
+                                    try reporter.stdoutW.flush();
+                                };
+                            } else |err| {
+                                try reporter.stdoutW.print("{s}{s}Could not open file - {s}\n", .{
+                                    path,
+                                    pad,
+                                    @errorName(err),
+                                });
+                                try reporter.stdoutW.flush();
                             }
-                        } else {
-                            return Error.InvalidStackSize;
                         }
-                    },
-                    .heap => |bufferSize| {
-                        const buff = try heapAllocator.alloc(u8, bufferSize.size());
-                        defer heapAllocator.free(buff);
-
-                        var file: std.Io.File = undefined;
-                        if (argsRes.positionals.reminder) |paths| {
-                            file = try std.Io.Dir.openFileAbsolute(io, paths[0], .{ .mode = .read_only });
-                        } else {
-                            file = std.Io.File.stdin();
-                        }
-                        defer file.close(io);
-
-                        const stat = try file.stat(io);
-                        const fileSize = stat.size;
-                        result.fileSize = fileSize;
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_SEQUENTIAL,
-                        );
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_DONTNEED,
-                        );
-
-                        var fReader = file.reader(io, buff);
-                        fReader.size = fileSize;
-
-                        request = .{
-                            .file = file,
-                            .reader = &fReader.interface,
-                            .hasher = &hasher,
-                        };
-
-                        return try dispatch(HasherT, &request, &result);
-                    },
-                    .direct => {
-                        if (argsRes.positionals.reminder == null)
-                            return Error.DirectHasNoTargetFile;
-
-                        const rc = std.posix.system.open(
-                            argsRes.positionals.reminder.?[0],
-                            .{ .DIRECT = true },
-                            @as(u32, 0),
-                        );
-                        if (rc < 0) return std.posix.unexpectedErrno(std.posix.errno(rc));
-
-                        const file: std.Io.File = .{
-                            .handle = rc,
-                            .flags = .{ .nonblocking = false },
-                        };
-                        defer file.close(io);
-
-                        const stat = try file.stat(io);
-                        const fileSize = stat.size;
-                        result.fileSize = fileSize;
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_SEQUENTIAL,
-                        );
-                        _ = std.os.linux.fadvise(
-                            file.handle,
-                            0,
-                            @bitCast(fileSize),
-                            c.POSIX_FADV_DONTNEED,
-                        );
-
-                        const buff = try heapAllocator.alloc(u8, fileSize);
-                        defer heapAllocator.free(buff);
-
-                        var fReader = file.reader(io, buff);
-
-                        request = .{
-                            .file = file,
-                            .reader = &fReader.interface,
-                            .hasher = &hasher,
-                        };
-
-                        return try dispatch(HasherT, &request, &result);
-                    },
-                }
+                        return;
+                    }
+                } else unreachable;
             }
-        } else {
-            unreachable;
-        }
+        } else unreachable;
     }
 };
+
+pub const IOFlavourEnum = @typeInfo(IOFlavour).@"union".tag_type.?;
 
 pub const PosCodec = struct {
     pub const Error = error{
@@ -462,7 +347,7 @@ pub const PosCodec = struct {
         byteUnit.Error;
 
     pub fn supports(comptime T: type, comptime _: anytype) bool {
-        return T == []const u8 or T == IOFlavour;
+        return T == IOFlavour;
     }
 
     pub fn parseByType(
@@ -472,13 +357,7 @@ pub const PosCodec = struct {
         allocator: *const std.mem.Allocator,
         cursor: *Cursor([]const u8),
     ) Error!T {
-        if (T == []const u8) {
-            const path = cursor.next() orelse return Error.MissingPath;
-            if (std.fs.path.isAbsolute(path)) return path;
-
-            const pathBuff = try allocator.alloc(u8, 4096);
-            return try std.fs.cwd().realpath(path, pathBuff);
-        } else if (T == IOFlavour) {
+        if (T == IOFlavour) {
             const enTag = try codec.PrimitiveCodec.parseByType(self, IOFlavourEnum, .null, allocator, cursor);
             inline for (@typeInfo(IOFlavourEnum).@"enum".fields) |field| {
                 if (std.mem.eql(u8, field.name, @tagName(enTag))) {
@@ -486,20 +365,18 @@ pub const PosCodec = struct {
                     const TagT = @FieldType(IOFlavour, name);
 
                     if (TagT == void) return @unionInit(IOFlavour, name, {});
-                    if (TagT == StackBuffLen) {
-                        return @unionInit(IOFlavour, name, try codec.PrimitiveCodec.parseByType(
-                            self,
-                            TagT,
-                            .null,
-                            allocator,
-                            cursor,
-                        ));
-                    }
-                    if (TagT == byteUnit.ByteUnit) {
-                        const sizeStr = cursor.next() orelse return Error.MissingPath;
-                        const bUnit = try zcasp.codec.byteUnit.parse(sizeStr);
-                        if (bUnit.size() == 0) return Error.ZeroSize;
-                        return @unionInit(IOFlavour, name, bUnit);
+                    if (TagT == ?byteUnit.ByteUnit) {
+                        var tagValue: ?byteUnit.ByteUnit = null;
+
+                        if (cursor.peek()) |sizeStr| {
+                            if (zcasp.codec.byteUnit.parse(sizeStr)) |bUnit| {
+                                cursor.consume();
+                                if (bUnit.size() == 0) return Error.ZeroSize;
+                                tagValue = bUnit;
+                            } else |_| {}
+                        }
+
+                        return @unionInit(IOFlavour, name, tagValue);
                     }
 
                     @compileError(
@@ -551,7 +428,7 @@ pub const Fadler64Cmd = struct {
         .description = "Runs fadler64 hashing algorithm on file",
         .examples = &.{
             "flechette mmap fadler64 hdiff r1gb.bin",
-            "flechette heap 8mb fadler64 scalar16 r1gb.bin",
+            "flechette heap fadler64 scalar16 r1gb.bin",
         },
         .positionalsDescription = .{
             .tuple = &.{
@@ -572,7 +449,7 @@ pub fn BasicHashingCmd(_HashT: type, comptime name: []const u8) type {
         pub const Positionals = positionals.EmptyPositionalsOf;
 
         pub const Help: HelpData(@This()) = .{
-            .usage = &.{"flechette <ioFlavour> " ++ name ++ " <file>"},
+            .usage = &.{"flechette <ioFlavour> " ++ name ++ " <file1 ... fileN>"},
             .shortDescription = "Runs " ++ name ++ " hashing algorithm on file",
             .description = "Runs " ++ name ++ " hashing algorithm on file",
             .examples = &.{
@@ -591,12 +468,14 @@ pub const Args = struct {
     @"io-benchmark": bool = false,
     @"args-benchmark": bool = false,
     uppercase: bool = false,
+    name: bool = false,
 
     pub const Short = .{
         .b = .benchmark,
         .ib = .@"io-benchmark",
         .ab = .@"args-benchmark",
         .u = .uppercase,
+        .n = .name,
     };
 
     pub const Positionals = positionals.PositionalOf(.{
@@ -604,7 +483,7 @@ pub const Args = struct {
         .TupleType = struct {
             IOFlavour,
         },
-        .ReminderType = ?[]const [:0]const u8,
+        .ReminderType = ?[]const []const u8,
     });
 
     pub const Verb = union(enum) {
@@ -620,12 +499,12 @@ pub const Args = struct {
     };
 
     pub const Help: HelpData(@This()) = .{
-        .usage = &.{"flechette <ioType> <command> <file>"},
+        .usage = &.{"flechette <ioType> <command> <file1 ... fileN>"},
         .description = "Cli to run hashing algorithms on a file treated as binary",
         .examples = &.{
             "Result only: flechette mmap adler64 r1gb.bin",
-            "Benchmark hash: flechette -b heap 8mb adler32 r1gb.bin",
-            "Benchmark IO: flechette -ib stack 4mb fadler64 scalar r1gb.bin",
+            "Benchmark hash: flechette -b heap xxh32 r1gb.bin",
+            "Benchmark IO: flechette -ib stack md5 r1gb.bin",
             "TIP: run any command with --help and it will fail and show help",
         },
         .positionalsDescription = .{
@@ -643,6 +522,7 @@ pub const Args = struct {
             .{ .field = .@"io-benchmark", .description = "Prints io benchmark on stderr. Skipped if used with --benchmark and mmap" },
             .{ .field = .@"args-benchmark", .description = "Prints args parser benchmark on stderr" },
             .{ .field = .uppercase, .description = "Prints hash in uppercase hex" },
+            .{ .field = .name, .description = "Prints path" },
         },
     };
 
