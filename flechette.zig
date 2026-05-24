@@ -16,6 +16,7 @@ const aegis = @import("flechette/aegis.zig");
 const rapidhash = @import("flechette/rapidhash.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
+const fs = regent.fs;
 const c = @import("flechette/c.zig").c;
 const openssl = @import("flechette/openssl.zig");
 
@@ -60,7 +61,6 @@ pub fn dispatch(
     result.* = .{
         .argsRes = result.argsRes,
         .path = result.path,
-        .pad = result.pad,
         .hash = hasher.final(),
         .chunks = chunkIndex,
         .elapsed = totalElapsed,
@@ -84,8 +84,7 @@ pub fn HashRequest(HasherT: type) type {
 pub fn HashResult(T: type) type {
     return struct {
         argsRes: *const ArgsResponse,
-        path: []const u8,
-        pad: []const u8,
+        path: [2][]const u8,
         hash: T,
         chunks: usize,
         elapsed: u64,
@@ -115,19 +114,20 @@ pub fn HashResult(T: type) type {
                 hashStr = &hexBuf;
             } else @compileError("Invalid hash type: " ++ @typeName(T));
 
+            try reporter.stdoutW.writeAll(hashStr);
+
             if (self.argsRes.options.name) {
-                var vecBuff: [2][]const u8 = .{
-                    self.path,
-                    self.pad,
+                var vecBuff: [5][]const u8 = .{
+                    "    ",
+                    self.path[0],
+                    if (self.path[1].len == 0) "" else "/",
+                    self.path[1],
+                    "\n",
                 };
                 try reporter.stdoutW.writeVecAll(&vecBuff);
+            } else {
+                try reporter.stdoutW.writeAll("\n");
             }
-
-            var vecBuff: [2][]const u8 = .{
-                hashStr,
-                "\n",
-            };
-            try reporter.stdoutW.writeVecAll(&vecBuff);
 
             const benchmark = self.argsRes.options.benchmark;
             const ioBenchmark = self.argsRes.options.@"io-benchmark";
@@ -204,8 +204,6 @@ pub const IOFlavour = union(enum) {
         self: *const IOFlavour,
         argsRes: *const ArgsResponse,
     ) !void {
-        @setEvalBranchQuota(100000);
-
         const VerbEnum = @typeInfo(Args.Verb).@"union".tag_type.?;
         const verb = argsRes.verb.?;
         // This likely wont work on older systems, seele has the same problem and I still dont have a good solution
@@ -223,113 +221,98 @@ pub const IOFlavour = union(enum) {
             .allocator = std.heap.page_allocator,
         };
 
-        var emptyAllocBuffer = std.heap.FixedBufferAllocator.init(&.{});
-        const emptyAllocator = emptyAllocBuffer.allocator();
-        const emptyContext: regent.ergo.Context = .{
+        const mmapContext: regent.ergo.Context = .{
             .io = io,
-            .allocator = emptyAllocator,
+            .allocator = stackAllocator,
         };
 
         inline for (std.meta.fields(VerbEnum), std.meta.fields(Args.Verb)) |verbEField, verbUField| {
             if (std.mem.eql(u8, verbUField.name, @tagName(verb))) {
                 const HasherT = verbUField.type.HashT;
                 const paths: []const []const u8 = if (argsRes.positionals.reminder) |reminder| reminder else &.{"-"};
-                const padSize: usize = rv: {
-                    var max: usize = 0;
-                    for (paths) |path| max = @max(max, path.len);
-                    break :rv max + 2;
+
+                const context = switch (self.*) {
+                    .mmap => mmapContext,
+                    .stack => stackContext,
+                    .heap, .direct => pageContext,
                 };
 
-                inline for (std.meta.fields(IOFlavourEnum)) |ioEField| {
-                    if (std.mem.eql(u8, ioEField.name, @tagName(self.*))) {
-                        const context = switch (@as(IOFlavourEnum, @enumFromInt(ioEField.value))) {
-                            .mmap,
-                            => emptyContext,
-                            .stack,
-                            => stackContext,
-                            .heap,
-                            .direct,
-                            => pageContext,
-                        };
+                const openConfig: fs.OpenConfig = switch (self.*) {
+                    .mmap, .stack, .heap => .{},
+                    .direct => .{ .oDirect = true },
+                };
 
-                        const openConfig: regent.io.OpenConfig = switch (@as(IOFlavourEnum, @enumFromInt(ioEField.value))) {
-                            .mmap,
-                            .stack,
-                            .heap,
-                            => .{ .mode = .read },
-                            .direct => .{
-                                .mode = .read,
-                                .extraOptions = .{ .oDirect = true },
-                            },
-                        };
+                const bufferConfig: fs.BufferConfig = switch (self.*) {
+                    .mmap => fs.defaultBufferConfig(.read),
+                    inline else => |bUnit| if (bUnit) |b| .initSame(b.size()) else fs.defaultBufferConfig(.read),
+                };
 
-                        const bufferConfig: regent.io.BufferConfig = switch (self.*) {
-                            .mmap,
-                            => openConfig.bufferConfig(),
-                            inline else => |bUnit| if (bUnit) |b| .initSame(b.size()) else openConfig.bufferConfig(),
-                        };
+                const bufferType: fs.BufferType = switch (self.*) {
+                    .mmap => .mmap,
+                    inline else => |bUnit| if (bUnit != null) .byte else .full,
+                };
 
-                        const bufferType: regent.io.BufferType = switch (self.*) {
-                            .mmap => .mmap,
-                            inline else => |bUnit| if (bUnit != null) .byte else .full,
-                        };
+                var fileCursor = regent.fs.FileCursor(.read).init(paths, argsRes.options.recursive);
 
-                        var fileCursor: regent.io.FileCursor(openConfig) = .init(paths);
-                        while (fileCursor.hasNext()) {
-                            const path = fileCursor.peekPath().?;
-                            const pad = try stackAllocator.alloc(u8, padSize - path.len);
-                            defer stackAllocator.free(pad);
-                            @memset(pad, ' ');
+                while (true) {
+                    if (fileCursor.nextWithConfig(
+                        context,
+                        openConfig,
+                        bufferType,
+                        bufferConfig,
+                    )) |optStream| {
+                        if (optStream == null) break;
 
-                            if (fileCursor.nextWithBuffConfig(context, bufferType, bufferConfig)) |optStream| {
-                                var stream = optStream.?;
-                                defer stream.close(context);
+                        const path = fileCursor.lastPath().?;
+                        var fstream = optStream.?;
+                        defer fstream.close(context);
 
-                                stream.fadvise(.{
-                                    c.POSIX_FADV_SEQUENTIAL,
-                                    c.POSIX_FADV_NOREUSE,
-                                });
-
-                                var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(verbEField.value))) {
-                                    .md5,
-                                    .sha256,
-                                    => .init(),
-                                    .fadler64 => .{
-                                        .flavour = verb.fadler64.positionals.tuple.@"0",
-                                    },
-                                    inline else => .{},
-                                };
-
-                                var request: HashRequest(HasherT) = .{
-                                    .file = stream.fileStream.file,
-                                    .reader = &stream.fileStream.interface,
-                                    .hasher = &hasher,
-                                };
-                                var result: HashResult(HasherT.R) = undefined;
-                                result.argsRes = argsRes;
-                                result.path = path;
-                                result.pad = pad;
-
-                                dispatch(HasherT, &request, &result) catch |err| {
-                                    try reporter.stdoutW.print("{s}{s}Could not hash file - {s}\n", .{
-                                        path,
-                                        pad,
-                                        @errorName(err),
-                                    });
-                                    try reporter.stdoutW.flush();
-                                };
-                            } else |err| {
-                                try reporter.stdoutW.print("{s}{s}Could not open file - {s}\n", .{
-                                    path,
-                                    pad,
-                                    @errorName(err),
-                                });
-                                try reporter.stdoutW.flush();
-                            }
+                        if (fstream.stream.size) |size| {
+                            fstream.fadvise(context, 0, size, &.{
+                                regent.linux.FADVISE.SEQUENTIAL,
+                                regent.linux.FADVISE.NOREUSE,
+                            });
                         }
-                        return;
+
+                        var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(verbEField.value))) {
+                            .md5, .sha256 => .init(),
+                            .fadler64 => .{ .flavour = verb.fadler64.positionals.tuple.@"0" },
+                            inline else => .{},
+                        };
+
+                        var request: HashRequest(HasherT) = .{
+                            .file = fstream.stream.file,
+                            .reader = &fstream.stream.interface,
+                            .hasher = &hasher,
+                        };
+                        var result: HashResult(HasherT.R) = undefined;
+                        result.argsRes = argsRes;
+                        result.path = path;
+
+                        dispatch(HasherT, &request, &result) catch |err| {
+                            try reporter.stdoutW.print("{s}{s}Could not hash file - {s}{s}{s}\n", .{
+                                @errorName(err),
+                                "    ",
+                                path[0],
+                                if (path[1].len == 0) "" else "/",
+                                path[1],
+                            });
+                            try reporter.stdoutW.flush();
+                        };
+                    } else |err| {
+                        const path = fileCursor.lastPath().?;
+
+                        try reporter.stdoutW.print("{s}{s}Could not open file - {s}{s}{s}\n", .{
+                            @errorName(err),
+                            "    ",
+                            path[0],
+                            if (path[1].len == 0) "" else "/",
+                            path[1],
+                        });
+                        try reporter.stdoutW.flush();
                     }
-                } else unreachable;
+                }
+                return;
             }
         } else unreachable;
     }
@@ -469,6 +452,7 @@ pub const Args = struct {
     @"args-benchmark": bool = false,
     uppercase: bool = false,
     name: bool = false,
+    recursive: bool = false,
 
     pub const Short = .{
         .b = .benchmark,
@@ -476,6 +460,7 @@ pub const Args = struct {
         .ab = .@"args-benchmark",
         .u = .uppercase,
         .n = .name,
+        .R = .recursive,
     };
 
     pub const Positionals = positionals.PositionalOf(.{
@@ -523,6 +508,7 @@ pub const Args = struct {
             .{ .field = .@"args-benchmark", .description = "Prints args parser benchmark on stderr" },
             .{ .field = .uppercase, .description = "Prints hash in uppercase hex" },
             .{ .field = .name, .description = "Prints path" },
+            .{ .field = .recursive, .description = "Will recursively follow directories and symlinks" },
         },
     };
 
