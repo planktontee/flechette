@@ -9,12 +9,12 @@
         //     .path = "dependencies/regent",
         // },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent.git#eebe25298fb89062f6742edf9d04dbd870c41a3c",
-            .hash = "regent-0.0.1-zgdbwy7dAADAasl1DEEi9glbgceIm8C-8XI5jafJZHPs",
+            .url = "git+https://github.com/planktontee/regent.git#58ac0ffea6f5b0158be0c911c6cef47c1abc7282",
+            .hash = "regent-0.0.1-zgdbw9bfAABRX_kwNh2b_T7JQrxLVfJP8PrIPFkjZmwE",
         },
         .zcasp = .{
-            .url = "git+https://github.com/planktontee/zcasp.git#fe1702de717e103a705afc2cafe2974a1738ceb9",
-            .hash = "zcasp-0.0.1-iIb82DhRAwBW-UB-2ws4UvbhTxdsuvhYdQM6Ha82ZW_p",
+            .url = "git+https://github.com/planktontee/zcasp.git#727d7cffc18c3ed6a7afc8ad6d10470598d5a2b4",
+            .hash = "zcasp-0.0.1-iIb82PFQAwBYAOVA24cceg9jxiODoqRdqALxUxzqDT6f",
         },
     },
     .minimum_zig_version = "0.16.0",

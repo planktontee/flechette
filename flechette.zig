@@ -14,6 +14,7 @@ const crc32 = @import("flechette/crc32.zig");
 const xxh3 = @import("flechette/xxh3.zig");
 const aegis = @import("flechette/aegis.zig");
 const rapidhash = @import("flechette/rapidhash.zig");
+const Blake2b = @import("flechette/blake2b.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
 const fs = regent.fs;
@@ -59,6 +60,7 @@ pub fn dispatch(
     const totalElapsed: u64 = @intCast(totalTimer.untilNow(io, .awake).toNanoseconds());
 
     result.* = .{
+        .context = result.context,
         .argsRes = result.argsRes,
         .path = result.path,
         .hash = hasher.final(),
@@ -83,6 +85,7 @@ pub fn HashRequest(HasherT: type) type {
 
 pub fn HashResult(T: type) type {
     return struct {
+        context: regent.ergo.Context,
         argsRes: *const ArgsResponse,
         path: [2][]const u8,
         hash: T,
@@ -112,7 +115,16 @@ pub fn HashResult(T: type) type {
                     try hexW.print("{x}", .{self.hash});
 
                 hashStr = &hexBuf;
+            } else if (TInfo == .pointer and TInfo.pointer.size == .slice) {
+                const hexBuf: []u8 = try self.context.allocator.alloc(u8, self.hash.len * 2);
+                var hexW: std.Io.Writer = .fixed(hexBuf);
+                if (upcase)
+                    try hexW.print("{X}", .{self.hash})
+                else
+                    try hexW.print("{x}", .{self.hash});
+                hashStr = hexBuf;
             } else @compileError("Invalid hash type: " ++ @typeName(T));
+            defer if (TInfo == .pointer) self.context.allocator.free(hashStr);
 
             try reporter.stdoutW.writeAll(hashStr);
 
@@ -277,8 +289,10 @@ pub const IOFlavour = union(enum) {
                         var hasher: HasherT = switch (@as(VerbEnum, @enumFromInt(verbEField.value))) {
                             .md5, .sha256 => .init(),
                             .fadler64 => .{ .flavour = verb.fadler64.positionals.tuple.@"0" },
+                            .blake2b => try Blake2b.init(verb.blake2b.positionals.tuple.@"0", context.allocator),
                             inline else => .{},
                         };
+                        defer if (HasherT == Blake2b) hasher.deinit();
 
                         var request: HashRequest(HasherT) = .{
                             .file = fstream.stream.file,
@@ -286,6 +300,7 @@ pub const IOFlavour = union(enum) {
                             .hasher = &hasher,
                         };
                         var result: HashResult(HasherT.R) = undefined;
+                        result.context = context;
                         result.argsRes = argsRes;
                         result.path = path;
 
@@ -425,6 +440,34 @@ pub const Fadler64Cmd = struct {
     };
 };
 
+pub const Blake2bCmd = struct {
+    pub const HashT = Blake2b;
+
+    pub const Positionals = positionals.PositionalOf(.{
+        .TupleType = struct { Blake2b.Type },
+        .ReminderType = void,
+    });
+
+    pub const Help: HelpData(@This()) = .{
+        .usage = &.{"flechette <ioFlavour> blake2b <Type> <file>"},
+        .shortDescription = "Runs blake2b hashing algorithm on file",
+        .description = "Runs blake2b hashing algorithm on file",
+        .examples = &.{
+            "flechette mmap blake2b 512 r1gb.bin",
+            "flechette heap blake2b 128 r1gb.bin",
+        },
+        .positionalsDescription = .{
+            .tuple = &.{
+                "Which blake2b flavour to run. Supported values: " ++ zcasp.help.enumValueHint(Blake2b.Type),
+            },
+        },
+    };
+
+    pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
+        .ensureCursorDone = false,
+    };
+};
+
 pub fn BasicHashingCmd(_HashT: type, comptime name: []const u8) type {
     return struct {
         pub const HashT = _HashT;
@@ -481,6 +524,7 @@ pub const Args = struct {
         rapidhash: BasicHashingCmd(rapidhash, "rapidhash"),
         md5: BasicHashingCmd(openssl.MD5, "md5"),
         sha256: BasicHashingCmd(openssl.SHA256, "sha256"),
+        blake2b: Blake2bCmd,
     };
 
     pub const Help: HelpData(@This()) = .{
