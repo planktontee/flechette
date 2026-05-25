@@ -7,6 +7,7 @@ pub const R = []u8;
 const Blake2b = @This();
 
 pub const Type = enum {
+    @"64",
     @"128",
     @"160",
     @"256",
@@ -17,6 +18,7 @@ pub const Type = enum {
 fn Blake2bInner(t: Type) type {
     return struct {
         ctx: switch (t) {
+            .@"64" => blake2.Blake2b(64),
             .@"128" => blake2.Blake2b128,
             .@"160" => blake2.Blake2b160,
             .@"256" => blake2.Blake2b256,
@@ -25,6 +27,7 @@ fn Blake2bInner(t: Type) type {
         } = .init(.{}),
         out: [
             switch (t) {
+                .@"64" => 64,
                 .@"128" => 128,
                 .@"160" => 160,
                 .@"256" => 256,
