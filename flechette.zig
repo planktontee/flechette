@@ -84,10 +84,12 @@ pub fn HashRequest(HasherT: type) type {
 }
 
 pub fn HashResult(T: type) type {
+    const RInfo = @typeInfo(T);
+    const RisSlice = RInfo == .pointer and RInfo.pointer.size == .slice;
     return struct {
         context: regent.ergo.Context,
         argsRes: *const ArgsResponse,
-        path: [2][]const u8,
+        path: []const u8,
         hash: T,
         chunks: usize,
         elapsed: u64,
@@ -95,6 +97,7 @@ pub fn HashResult(T: type) type {
         ioElapsed: u64,
         fileSize: u64,
         bytesProcessed: u64,
+        auxBuff: if (RisSlice) ?[]u8 else void = if (RisSlice) null else {},
 
         pub fn print(self: *@This()) !void {
             const upcase = self.argsRes.options.uppercase;
@@ -115,8 +118,16 @@ pub fn HashResult(T: type) type {
                     try hexW.print("{x}", .{self.hash});
 
                 hashStr = &hexBuf;
-            } else if (TInfo == .pointer and TInfo.pointer.size == .slice) {
-                const hexBuf: []u8 = try self.context.allocator.alloc(u8, self.hash.len * 2);
+            } else if (RisSlice) {
+                const hexBuf = r: {
+                    if (self.auxBuff) |hexBuff| {
+                        @memset(hexBuff, undefined);
+                        break :r hexBuff;
+                    } else {
+                        self.auxBuff = try self.context.allocator.alloc(u8, self.hash.len * 2);
+                        break :r self.auxBuff.?;
+                    }
+                };
                 var hexW: std.Io.Writer = .fixed(hexBuf);
                 if (upcase)
                     try hexW.print("{X}", .{self.hash})
@@ -129,11 +140,9 @@ pub fn HashResult(T: type) type {
             try reporter.stdoutW.writeAll(hashStr);
 
             if (self.argsRes.options.name) {
-                var vecBuff: [5][]const u8 = .{
+                var vecBuff: [3][]const u8 = .{
                     "    ",
-                    self.path[0],
-                    if (self.path[1].len == 0) "" else "/",
-                    self.path[1],
+                    self.path,
                     "\n",
                 };
                 try reporter.stdoutW.writeVecAll(&vecBuff);
@@ -194,8 +203,14 @@ pub fn HashResult(T: type) type {
                 );
             }
 
-            try reporter.stderrW.flush();
+            if (benchmark or ioBenchmark) try reporter.stderrW.flush();
             try reporter.stdoutW.flush();
+        }
+
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+            if (RisSlice) {
+                if (self.auxBuff) |buff| allocator.free(buff);
+            }
         }
     };
 }
@@ -265,6 +280,12 @@ pub const IOFlavour = union(enum) {
                 };
 
                 var fileCursor = regent.fs.FileCursor(.read).init(paths, argsRes.options.recursive);
+                defer fileCursor.deinit();
+
+                var result: HashResult(HasherT.R) = undefined;
+                defer result.deinit(context.allocator);
+                result.context = context;
+                result.argsRes = argsRes;
 
                 while (true) {
                     if (fileCursor.nextWithConfig(
@@ -275,7 +296,8 @@ pub const IOFlavour = union(enum) {
                     )) |optStream| {
                         if (optStream == null) break;
 
-                        const path = fileCursor.lastPath().?;
+                        const path = fileCursor.currentPath().?;
+                        result.path = path;
                         var fstream = optStream.?;
                         defer fstream.close(context);
 
@@ -299,30 +321,20 @@ pub const IOFlavour = union(enum) {
                             .reader = &fstream.stream.interface,
                             .hasher = &hasher,
                         };
-                        var result: HashResult(HasherT.R) = undefined;
-                        result.context = context;
-                        result.argsRes = argsRes;
-                        result.path = path;
 
                         dispatch(HasherT, &request, &result) catch |err| {
-                            try reporter.stdoutW.print("{s}{s}Could not hash file - {s}{s}{s}\n", .{
+                            try reporter.stdoutW.print("{s}{s}Could not hash file - {s}\n", .{
                                 @errorName(err),
                                 "    ",
-                                path[0],
-                                if (path[1].len == 0) "" else "/",
-                                path[1],
+                                path,
                             });
                             try reporter.stdoutW.flush();
                         };
                     } else |err| {
-                        const path = fileCursor.lastPath().?;
-
-                        try reporter.stdoutW.print("{s}{s}Could not open file - {s}{s}{s}\n", .{
+                        try reporter.stdoutW.print("{s}{s}Could not open file - {s}\n", .{
                             @errorName(err),
                             "    ",
-                            path[0],
-                            if (path[1].len == 0) "" else "/",
-                            path[1],
+                            fileCursor.currentPath().?,
                         });
                         try reporter.stdoutW.flush();
                     }
