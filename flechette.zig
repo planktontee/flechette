@@ -279,7 +279,10 @@ pub const IOFlavour = union(enum) {
                     inline else => |bUnit| if (bUnit != null) .byte else .full,
                 };
 
-                var fileCursor = regent.fs.FileCursor(.read).init(paths, argsRes.options.recursive);
+                const recursive = argsRes.options.recursive or argsRes.options.@"recursive-follow-symlink";
+                const followSymlink = argsRes.options.@"recursive-follow-symlink";
+
+                var fileCursor = regent.fs.FileCursor(.read).initWithFlags(paths, recursive, followSymlink);
                 defer fileCursor.deinit();
 
                 var result: HashResult(HasherT.R) = undefined;
@@ -287,6 +290,7 @@ pub const IOFlavour = union(enum) {
                 result.context = context;
                 result.argsRes = argsRes;
 
+                // TODO: reuse/expand buffer between files (as an option)
                 while (true) {
                     if (fileCursor.nextWithConfig(
                         context,
@@ -508,6 +512,7 @@ pub const Args = struct {
     uppercase: bool = false,
     name: bool = false,
     recursive: bool = false,
+    @"recursive-follow-symlink": bool = false,
 
     pub const Short = .{
         .b = .benchmark,
@@ -515,7 +520,8 @@ pub const Args = struct {
         .ab = .@"args-benchmark",
         .u = .uppercase,
         .n = .name,
-        .R = .recursive,
+        .r = .recursive,
+        .R = .@"recursive-follow-symlink",
     };
 
     pub const Positionals = positionals.PositionalOf(.{
@@ -564,12 +570,16 @@ pub const Args = struct {
             .{ .field = .@"args-benchmark", .description = "Prints args parser benchmark on stderr" },
             .{ .field = .uppercase, .description = "Prints hash in uppercase hex" },
             .{ .field = .name, .description = "Prints path" },
-            .{ .field = .recursive, .description = "Will recursively follow directories and symlinks" },
+            .{ .field = .recursive, .description = "Will recursively follow directories" },
+            .{ .field = .@"recursive-follow-symlink", .description = "Will recursively follow directories and symlinks" },
         },
     };
 
     pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
         .mandatoryVerb = true,
+        .mutuallyExclusive = &.{
+            &.{ .recursive, .@"recursive-follow-symlink" },
+        },
     };
 };
 
@@ -609,7 +619,8 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         break :rv &r;
     };
 
-    var stackAllocBuffer: [units.ByteUnit.kb * 8]u8 = undefined;
+    // paths are kinda heavy :p
+    var stackAllocBuffer: [units.ByteUnit.mb * 1]u8 = undefined;
     var sba = std.heap.FixedBufferAllocator.init(&stackAllocBuffer);
     const stackAllocator = sba.allocator();
 
