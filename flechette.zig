@@ -565,27 +565,30 @@ pub const Args = struct {
             .reminder = "File to hash, if nothing provided uses stdin.",
         },
         .optionsDescription = &.{
-            .{ .field = .benchmark, .description = "Prints hash benchmark on stderr" },
-            .{ .field = .@"io-benchmark", .description = "Prints io benchmark on stderr. Skipped if used with --benchmark and mmap" },
-            .{ .field = .@"args-benchmark", .description = "Prints args parser benchmark on stderr" },
-            .{ .field = .uppercase, .description = "Prints hash in uppercase hex" },
-            .{ .field = .name, .description = "Prints path" },
-            .{ .field = .recursive, .description = "Will recursively follow directories" },
-            .{ .field = .@"recursive-follow-symlink", .description = "Will recursively follow directories and symlinks" },
+            .{ .field = .benchmark, .description = "Prints hash benchmark on stderr." },
+            .{ .field = .@"io-benchmark", .description = "Prints io benchmark on stderr. Skipped if used with --benchmark and mmap." },
+            .{ .field = .@"args-benchmark", .description = "Prints args parser benchmark on stderr." },
+            .{ .field = .uppercase, .description = "Prints hash in uppercase hex." },
+            .{ .field = .name, .description = "Prints path." },
+            .{ .field = .recursive, .description = "Will recursively follow directories. Excludes --recursive-follow-symlink." },
+            .{ .field = .@"recursive-follow-symlink", .description = "Will recursively follow directories and symlinks. Excludes --recursive." },
         },
     };
 
+    fn validateArgs(fbset: zcasp.validate.FieldBitSet(@This())) zcasp.validate.Error!void {
+        if (fbset.allOf(.{ .recursive, .@"recursive-follow-symlink" })) return error.MutuallyExclusiveArgsPresent;
+    }
+
     pub const GroupMatch: zcasp.validate.GroupMatchConfig(@This()) = .{
         .mandatoryVerb = true,
-        .mutuallyExclusive = &.{
-            &.{ .recursive, .@"recursive-follow-symlink" },
-        },
+        .validateFn = @This().validateArgs,
     };
 };
 
 const ArgsResponse = spec.SpecResponseWithConfig(Args, zcasp.help.HelpConf{
     .backwardsBranchesQuote = 1000000,
     .simpleTypes = true,
+    .headerDelimiter = "",
 }, true);
 
 const Reporter = struct {
