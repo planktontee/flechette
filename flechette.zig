@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const regent = @import("regent");
 const zcasp = @import("zcasp");
 const coll = regent.collections;
@@ -59,20 +60,14 @@ pub fn dispatch(
     }
     const totalElapsed: u64 = @intCast(totalTimer.untilNow(io, .awake).toNanoseconds());
 
-    result.* = .{
-        .context = result.context,
-        .argsRes = result.argsRes,
-        .path = result.path,
-        .hash = hasher.final(),
-        .chunks = chunkIndex,
-        .elapsed = totalElapsed,
-        .hasherElapsed = hasherElapsed,
-        .ioElapsed = ioElapsed,
-        .fileSize = result.fileSize,
-        .bytesProcessed = bytesProcessed,
-    };
-
-    try result.print();
+    try result.print(
+        hasher.final(),
+        chunkIndex,
+        totalElapsed,
+        hasherElapsed,
+        ioElapsed,
+        bytesProcessed,
+    );
 }
 
 pub fn HashRequest(HasherT: type) type {
@@ -90,16 +85,18 @@ pub fn HashResult(T: type) type {
         context: regent.ergo.Context,
         argsRes: *const ArgsResponse,
         path: []const u8,
-        hash: T,
-        chunks: usize,
-        elapsed: u64,
-        hasherElapsed: u64,
-        ioElapsed: u64,
         fileSize: u64,
-        bytesProcessed: u64,
         auxBuff: if (RisSlice) ?[]u8 else void = if (RisSlice) null else {},
 
-        pub fn print(self: *@This()) !void {
+        pub fn print(
+            self: *@This(),
+            hash: T,
+            chunks: usize,
+            elapsed: u64,
+            hasherElapsed: u64,
+            ioElapsed: u64,
+            bytesProcessed: u64,
+        ) !void {
             const upcase = self.argsRes.options.uppercase;
             const TInfo = @typeInfo(T);
             var hashStr: []const u8 = undefined;
@@ -107,15 +104,15 @@ pub fn HashResult(T: type) type {
             if (TInfo == .int) {
                 var hexBuf: [@sizeOf(T) * 8]u8 = undefined;
                 var hexW: std.Io.Writer = .fixed(&hexBuf);
-                try hexW.printInt(self.hash, 16, if (upcase) .upper else .lower, .{});
+                try hexW.printInt(hash, 16, if (upcase) .upper else .lower, .{});
                 hashStr = hexW.buffered();
             } else if (TInfo == .array) {
                 var hexBuf: [TInfo.array.len * 2]u8 = undefined;
                 var hexW: std.Io.Writer = .fixed(&hexBuf);
                 if (upcase)
-                    try hexW.print("{X}", .{self.hash})
+                    try hexW.print("{X}", .{hash})
                 else
-                    try hexW.print("{x}", .{self.hash});
+                    try hexW.print("{x}", .{hash});
 
                 hashStr = &hexBuf;
             } else if (RisSlice) {
@@ -124,22 +121,22 @@ pub fn HashResult(T: type) type {
                         @memset(hexBuff, undefined);
                         break :r hexBuff;
                     } else {
-                        self.auxBuff = try self.context.allocator.alloc(u8, self.hash.len * 2);
+                        self.auxBuff = try self.context.allocator.alloc(u8, hash.len * 2);
                         break :r self.auxBuff.?;
                     }
                 };
                 var hexW: std.Io.Writer = .fixed(hexBuf);
                 if (upcase)
-                    try hexW.print("{X}", .{self.hash})
+                    try hexW.print("{X}", .{hash})
                 else
-                    try hexW.print("{x}", .{self.hash});
+                    try hexW.print("{x}", .{hash});
                 hashStr = hexBuf;
             } else @compileError("Invalid hash type: " ++ @typeName(T));
             defer if (TInfo == .pointer) self.context.allocator.free(hashStr);
 
             try reporter.stdoutW.writeAll(hashStr);
 
-            if (self.argsRes.options.name) {
+            if (self.argsRes.options.name or self.argsRes.options.recursive or self.argsRes.options.@"recursive-follow-symlink") {
                 var vecBuff: [3][]const u8 = .{
                     "    ",
                     self.path,
@@ -152,11 +149,11 @@ pub fn HashResult(T: type) type {
 
             const benchmark = self.argsRes.options.benchmark;
             const ioBenchmark = self.argsRes.options.@"io-benchmark";
-            const totalElapsedF: f128 = @floatFromInt(self.elapsed);
+            const totalElapsedF: f128 = @floatFromInt(elapsed);
 
             if (benchmark) {
-                const elapsedF: f128 = @floatFromInt(self.hasherElapsed);
-                const bytesProcessedF: f128 = @floatFromInt(self.bytesProcessed);
+                const elapsedF: f128 = @floatFromInt(hasherElapsed);
+                const bytesProcessedF: f128 = @floatFromInt(bytesProcessed);
                 const elapsedInSec = elapsedF / units.NanoUnit.s;
                 try reporter.stderrW.print(
                     "{s} hashing: 0x{s}, elapsed {d:.2}s {d:.2}ms, {d:.2} MB/s {d:.2} GB/s\n",
@@ -175,8 +172,8 @@ pub fn HashResult(T: type) type {
                 if (self.argsRes.positionals.tuple.@"0" == .mmap) {
                     try reporter.stderrW.writeAll("mmap io: benchmark skipped, mmap can't be benchmarked separately\n");
                 } else {
-                    const elapsedF: f128 = @floatFromInt(self.ioElapsed);
-                    const bytesProcessedF: f128 = @floatFromInt(self.bytesProcessed);
+                    const elapsedF: f128 = @floatFromInt(ioElapsed);
+                    const bytesProcessedF: f128 = @floatFromInt(bytesProcessed);
                     const elapsedInSec = elapsedF / units.NanoUnit.s;
                     try reporter.stderrW.print(
                         "{s} io: elapsed {d:.2}s {d:.2}ms, {d:.2} MB/s {d:.2} GB/s, chunk {d} {d:.2}%\n",
@@ -186,7 +183,7 @@ pub fn HashResult(T: type) type {
                             elapsedF / units.NanoUnit.ms,
                             bytesProcessedF / units.ByteUnit.mb / elapsedInSec,
                             bytesProcessedF / units.ByteUnit.gb / elapsedInSec,
-                            self.chunks,
+                            chunks,
                             bytesProcessedF / @as(f128, @floatFromInt(self.fileSize)) * 100.0,
                         },
                     );
@@ -203,8 +200,8 @@ pub fn HashResult(T: type) type {
                 );
             }
 
-            if (benchmark or ioBenchmark) try reporter.stderrW.flush();
-            try reporter.stdoutW.flush();
+            if (reporter.errIsTTY() and (benchmark or ioBenchmark)) try reporter.stderrW.flush();
+            if (reporter.outIsTTY()) try reporter.stdoutW.flush();
         }
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -230,14 +227,11 @@ pub const IOFlavour = union(enum) {
     pub fn run(
         self: *const IOFlavour,
         argsRes: *const ArgsResponse,
+        stackAllocator: std.mem.Allocator,
     ) !void {
         const VerbEnum = @typeInfo(Args.Verb).@"union".tag_type.?;
         const verb = argsRes.verb.?;
-        // This likely wont work on older systems, seele has the same problem and I still dont have a good solution
-        // for this
-        var stackAllocBuffer: [units.ByteUnit.mb * 8]u8 = undefined;
-        var sba = std.heap.FixedBufferAllocator.init(&stackAllocBuffer);
-        const stackAllocator = sba.allocator();
+
         const stackContext: regent.ergo.Context = .{
             .io = io,
             .allocator = stackAllocator,
@@ -327,20 +321,18 @@ pub const IOFlavour = union(enum) {
                         };
 
                         dispatch(HasherT, &request, &result) catch |err| {
-                            try reporter.stdoutW.print("{s}{s}Could not hash file - {s}\n", .{
+                            try reporter.stdoutW.print("{s}    Could not hash file - {s}\n", .{
                                 @errorName(err),
-                                "    ",
                                 path,
                             });
-                            try reporter.stdoutW.flush();
+                            if (reporter.outIsTTY()) try reporter.stdoutW.flush();
                         };
                     } else |err| {
-                        try reporter.stdoutW.print("{s}{s}Could not open file - {s}\n", .{
+                        try reporter.stdoutW.print("{s}    Could not open file - {s}\n", .{
                             @errorName(err),
-                            "    ",
                             fileCursor.currentPath().?,
                         });
-                        try reporter.stdoutW.flush();
+                        if (reporter.outIsTTY()) try reporter.stdoutW.flush();
                     }
                 }
                 return;
@@ -592,14 +584,41 @@ const ArgsResponse = spec.SpecResponseWithConfig(Args, zcasp.help.HelpConf{
 }, true);
 
 const Reporter = struct {
+    stdoutStream: regent.fs.FileStream(.write) = undefined,
+    stderrStream: regent.fs.FileStream(.write) = undefined,
     stdoutW: *std.Io.Writer = undefined,
     stderrW: *std.Io.Writer = undefined,
+
+    pub fn outIsTTY(self: *const @This()) bool {
+        return self.stdoutStream.stat.kind == .character_device;
+    }
+
+    pub fn errIsTTY(self: *const @This()) bool {
+        return self.stderrStream.stat.kind == .character_device;
+    }
 };
 
 var reporter: *const Reporter = undefined;
 var io: std.Io = undefined;
 
 pub fn main(init: std.process.Init.Minimal) !u8 {
+    return try regent.trampoline.stackTrampoline(
+        @typeInfo(@TypeOf(trampMain)).@"fn".return_type.?,
+        u6,
+        init,
+        trampMain,
+        if (builtin.mode == .Debug) 3 else 1,
+    );
+}
+
+const MainError = error{
+    ErrorPartitioningStackMemory,
+};
+
+pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocator) !u8 {
+    if (optStackAlloc == null) return MainError.ErrorPartitioningStackMemory;
+    const stackAlloc = optStackAlloc.?;
+
     io = v: {
         var i = std.Io.Threaded.init_single_threaded;
         break :v i.io();
@@ -607,28 +626,26 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
 
     reporter = rv: {
         var r: Reporter = .{};
-        var buffOut: [256]u8 = undefined;
-        var buffErr: [4098]u8 = undefined;
-
-        r.stdoutW = rOut: {
-            var writer = std.Io.File.stdout().writerStreaming(io, &buffOut);
-            break :rOut &writer.interface;
-        };
-        r.stderrW = rErr: {
-            var writer = std.Io.File.stderr().writerStreaming(io, &buffErr);
-            break :rErr &writer.interface;
+        const context: regent.ergo.Context = .{
+            .allocator = stackAlloc,
+            .io = io,
         };
 
+        r.stdoutStream = try regent.fs.FileStream(.write).openStream(
+            context,
+            std.Io.File.stdout(),
+        );
+        r.stdoutW = &r.stdoutStream.stream.interface;
+        r.stderrStream = try regent.fs.FileStream(.write).openStream(
+            context,
+            std.Io.File.stderr(),
+        );
+        r.stderrW = &r.stderrStream.stream.interface;
         break :rv &r;
     };
 
-    // paths are kinda heavy :p
-    var stackAllocBuffer: [units.ByteUnit.mb * 1]u8 = undefined;
-    var sba = std.heap.FixedBufferAllocator.init(&stackAllocBuffer);
-    const stackAllocator = sba.allocator();
-
     var clock = std.Io.Clock.awake.now(io);
-    var argsRes: ArgsResponse = .init(stackAllocator);
+    var argsRes: ArgsResponse = .init(stackAlloc);
     defer argsRes.deinit();
 
     if (argsRes.parseArgs(init.args)) |parseError| {
@@ -646,7 +663,7 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     }
 
     const ioFlavour: IOFlavour = argsRes.positionals.tuple.@"0";
-    try ioFlavour.run(&argsRes);
+    try ioFlavour.run(&argsRes, stackAlloc);
 
     try reporter.stderrW.flush();
     try reporter.stdoutW.flush();

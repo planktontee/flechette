@@ -9,6 +9,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .link_libc = true,
+        .strip = optimize == .ReleaseFast,
+        .omit_frame_pointer = optimize == .ReleaseFast,
     });
     const regent = b.dependency("regent", .{
         .target = target,
@@ -22,7 +24,9 @@ pub fn build(b: *std.Build) void {
     module.addImport("regent", regent);
     module.addImport("zcasp", zcasp);
     zcasp.addImport("regent", regent);
-    module.linkSystemLibrary("crypto", .{});
+    module.linkSystemLibrary("crypto", .{
+        .preferred_link_mode = .static,
+    });
 
     const unit_tests = b.addTest(.{
         .root_module = module,
