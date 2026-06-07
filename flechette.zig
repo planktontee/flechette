@@ -224,11 +224,20 @@ pub const IOFlavour = union(enum) {
         MmapHasNoTargetFile,
     };
 
+    fn handleError(failed: *bool, path: []const u8, err: anyerror) !void {
+        failed.* |= true;
+        try reporter.stdoutW.print("{s}    Could not hash file - {s}\n", .{
+            @errorName(err),
+            path,
+        });
+        if (reporter.outIsTTY()) try reporter.stdoutW.flush();
+    }
+
     pub fn run(
         self: *const IOFlavour,
         argsRes: *const ArgsResponse,
         stackAllocator: std.mem.Allocator,
-    ) !void {
+    ) !bool {
         const VerbEnum = @typeInfo(Args.Verb).@"union".tag_type.?;
         const verb = argsRes.verb.?;
 
@@ -285,6 +294,7 @@ pub const IOFlavour = union(enum) {
                 result.argsRes = argsRes;
 
                 // TODO: reuse/expand buffer between files (as an option)
+                var failed: bool = false;
                 while (true) {
                     if (fileCursor.nextWithConfig(
                         context,
@@ -320,22 +330,19 @@ pub const IOFlavour = union(enum) {
                             .hasher = &hasher,
                         };
 
-                        dispatch(HasherT, &request, &result) catch |err| {
-                            try reporter.stdoutW.print("{s}    Could not hash file - {s}\n", .{
-                                @errorName(err),
+                        dispatch(HasherT, &request, &result) catch |err|
+                            try handleError(
+                                &failed,
                                 path,
-                            });
-                            if (reporter.outIsTTY()) try reporter.stdoutW.flush();
-                        };
-                    } else |err| {
-                        try reporter.stdoutW.print("{s}    Could not open file - {s}\n", .{
-                            @errorName(err),
-                            fileCursor.currentPath().?,
-                        });
-                        if (reporter.outIsTTY()) try reporter.stdoutW.flush();
-                    }
+                                err,
+                            );
+                    } else |err| try handleError(
+                        &failed,
+                        fileCursor.currentPath().?,
+                        err,
+                    );
                 }
-                return;
+                return failed;
             }
         } else unreachable;
     }
@@ -663,10 +670,10 @@ pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocat
     }
 
     const ioFlavour: IOFlavour = argsRes.positionals.tuple.@"0";
-    try ioFlavour.run(&argsRes, stackAlloc);
+    const hadErrors = try ioFlavour.run(&argsRes, stackAlloc);
 
     try reporter.stderrW.flush();
     try reporter.stdoutW.flush();
 
-    return 0;
+    return if (hadErrors) 1 else 0;
 }
