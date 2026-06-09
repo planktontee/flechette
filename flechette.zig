@@ -285,7 +285,10 @@ pub const IOFlavour = union(enum) {
                 const recursive = argsRes.options.recursive or argsRes.options.@"recursive-follow-symlink";
                 const followSymlink = argsRes.options.@"recursive-follow-symlink";
 
-                var fileCursor = regent.fs.FileCursor(.read).initWithFlags(paths, recursive, followSymlink);
+                var fileCursor = regent.fs.FileCursor(.read).initWithConfig(paths, .{
+                    .recursive = recursive,
+                    .followSymlink = followSymlink,
+                });
                 defer fileCursor.deinit();
 
                 var result: HashResult(HasherT.R) = undefined;
@@ -512,6 +515,8 @@ pub const Args = struct {
     name: bool = false,
     recursive: bool = false,
     @"recursive-follow-symlink": bool = false,
+    // TODO: add file match
+    // TODO: add directory match
 
     pub const Short = .{
         .b = .benchmark,
