@@ -306,11 +306,14 @@ pub const IOFlavour = union(enum) {
                         bufferConfig,
                     )) |optStream| {
                         if (optStream == null) break;
+                        var fstream = optStream.?;
+                        defer {
+                            fstream.close(context);
+                            fstream.deinit(context);
+                        }
 
                         const path = fileCursor.currentPath().?;
                         result.path = path;
-                        var fstream = optStream.?;
-                        defer fstream.close(context);
 
                         if (fstream.stream.size) |size| {
                             fstream.fadvise(context, 0, size, &.{
@@ -608,6 +611,13 @@ const Reporter = struct {
     pub fn errIsTTY(self: *const @This()) bool {
         return self.stderrStream.stat.kind == .character_device;
     }
+
+    pub fn deinit(self: *const @This(), context: regent.ergo.Context) void {
+        var stderrS = self.stderrStream;
+        stderrS.deinit(context);
+        var stdoutS = self.stdoutStream;
+        stdoutS.deinit(context);
+    }
 };
 
 var reporter: *const Reporter = undefined;
@@ -627,6 +637,7 @@ const MainError = error{
     ErrorPartitioningStackMemory,
 };
 
+// TODO: add debug alloc to check for frees
 pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocator) !u8 {
     if (optStackAlloc == null) return MainError.ErrorPartitioningStackMemory;
     const stackAlloc = optStackAlloc.?;
@@ -636,12 +647,13 @@ pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocat
         break :v i.io();
     };
 
+    const context: regent.ergo.Context = .{
+        .allocator = stackAlloc,
+        .io = io,
+    };
+
     reporter = rv: {
         var r: Reporter = .{};
-        const context: regent.ergo.Context = .{
-            .allocator = stackAlloc,
-            .io = io,
-        };
 
         r.stdoutStream = try regent.fs.FileStream(.write).openStream(
             context,
@@ -655,6 +667,13 @@ pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocat
         r.stderrW = &r.stderrStream.stream.interface;
         break :rv &r;
     };
+    defer {
+        if (!reporter.errIsTTY())
+            reporter.stderrW.flush() catch {};
+        if (!reporter.outIsTTY())
+            reporter.stdoutW.flush() catch {};
+        reporter.deinit(context);
+    }
 
     var clock = std.Io.Clock.awake.now(io);
     var argsRes: ArgsResponse = .init(stackAlloc);
@@ -676,9 +695,6 @@ pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocat
 
     const ioFlavour: IOFlavour = argsRes.positionals.tuple.@"0";
     const hadErrors = try ioFlavour.run(&argsRes, stackAlloc);
-
-    try reporter.stderrW.flush();
-    try reporter.stdoutW.flush();
 
     return if (hadErrors) 1 else 0;
 }
