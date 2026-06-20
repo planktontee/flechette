@@ -214,6 +214,7 @@ pub fn HashResult(T: type) type {
 
 pub const IOFlavour = union(enum) {
     mmap,
+    promoter: ?byteUnit.ByteUnit,
     stack: ?byteUnit.ByteUnit,
     heap: ?byteUnit.ByteUnit,
     direct: ?byteUnit.ByteUnit,
@@ -256,6 +257,21 @@ pub const IOFlavour = union(enum) {
             .allocator = stackAllocator,
         };
 
+        const promoterContext: regent.ergo.Context = .{
+            .io = io,
+            .allocator = if (builtin.mode == .Debug)
+                stackAllocator
+            else r: {
+                const fba: *std.heap.FixedBufferAllocator = @ptrCast(@alignCast(stackAllocator.ptr));
+                var promotingFba: regent.mem.PromotingSfba = .{
+                    .fixed_buffer_allocator = fba.*,
+                    .fallback_allocator = std.heap.smp_allocator,
+                };
+                const allc = promotingFba.allocator();
+                break :r allc;
+            },
+        };
+
         inline for (std.meta.fields(VerbEnum), std.meta.fields(Args.Verb)) |verbEField, verbUField| {
             if (std.mem.eql(u8, verbUField.name, @tagName(verb))) {
                 const HasherT = verbUField.type.HashT;
@@ -265,10 +281,11 @@ pub const IOFlavour = union(enum) {
                     .mmap => mmapContext,
                     .stack => stackContext,
                     .heap, .direct => pageContext,
+                    .promoter => promoterContext,
                 };
 
                 const openConfig: fs.OpenConfig = switch (self.*) {
-                    .mmap, .stack, .heap => .{},
+                    .mmap, .stack, .heap, .promoter => .{},
                     .direct => .{ .oDirect = true },
                 };
 
