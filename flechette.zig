@@ -248,7 +248,7 @@ pub const IOFlavour = union(enum) {
 
         const pageContext: regent.ergo.Context = .{
             .io = io,
-            .allocator = std.heap.page_allocator,
+            .allocator = if (builtin.mode == .Debug) stackAllocator else std.heap.smp_allocator,
         };
 
         const mmapContext: regent.ergo.Context = .{
@@ -296,20 +296,45 @@ pub const IOFlavour = union(enum) {
                 result.context = context;
                 result.argsRes = argsRes;
 
-                // TODO: reuse/expand buffer between files (as an option)
+                const alignment = regent.fs.oDirectAlignment;
+                var resizeableBuffer: std.ArrayListAlignedUnmanaged(u8, alignment) = .empty;
+                defer resizeableBuffer.deinit(context.allocator);
+
                 var failed: bool = false;
                 while (true) {
                     if (fileCursor.nextWithConfig(
                         context,
                         openConfig,
-                        bufferType,
+                        if (bufferType == .mmap) .mmap else .unmanaged,
                         bufferConfig,
                     )) |optStream| {
                         if (optStream == null) break;
                         var fstream = optStream.?;
                         defer {
                             fstream.close(context);
-                            fstream.deinit(context);
+                            if (bufferType == .mmap) fstream.deinit(context);
+                        }
+
+                        switch (bufferType) {
+                            .mmap => {},
+                            .byte => {
+                                const bufferedSize = try bufferConfig.get(fstream.stat.kind);
+                                if (resizeableBuffer.capacity != bufferedSize)
+                                    try resizeableBuffer.ensureTotalCapacity(context.allocator, bufferedSize);
+                            },
+                            .full => {
+                                if (resizeableBuffer.capacity < fstream.stat.size)
+                                    try resizeableBuffer.ensureTotalCapacity(context.allocator, fstream.stat.size);
+                            },
+                            .unmanaged => unreachable,
+                        }
+
+                        switch (bufferType) {
+                            .mmap => {},
+                            .byte, .full => {
+                                fstream.setBuffer(alignment, resizeableBuffer.items.ptr[0..resizeableBuffer.capacity]);
+                            },
+                            .unmanaged => unreachable,
                         }
 
                         const path = fileCursor.currentPath().?;
@@ -624,13 +649,29 @@ var reporter: *const Reporter = undefined;
 var io: std.Io = undefined;
 
 pub fn main(init: std.process.Init.Minimal) !u8 {
-    return try regent.trampoline.stackTrampoline(
+    const DebugAlloc = std.heap.DebugAllocator(.{});
+    var allocator: std.mem.Allocator = undefined;
+    const result = if (builtin.mode == .Debug) r: {
+        var dba: DebugAlloc = .init;
+        allocator = dba.allocator();
+        break :r trampMain(init, allocator);
+    } else regent.trampoline.stackTrampoline(
         @typeInfo(@TypeOf(trampMain)).@"fn".return_type.?,
         u6,
         init,
         trampMain,
         if (builtin.mode == .Debug) 3 else 1,
     );
+
+    if (builtin.mode == .Debug) {
+        var dba: *DebugAlloc = @ptrCast(@alignCast(allocator.ptr));
+        switch (dba.deinit()) {
+            .leak => {},
+            .ok => {},
+        }
+    }
+
+    return result;
 }
 
 const MainError = error{
