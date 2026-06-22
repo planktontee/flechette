@@ -695,11 +695,11 @@ const MainError = error{
     ErrorPartitioningStackMemory,
 };
 
-// TODO: add debug alloc to check for frees
 pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocator) !u8 {
     if (optStackAlloc == null) return MainError.ErrorPartitioningStackMemory;
     const stackAlloc = optStackAlloc.?;
 
+    // TODO: multithreading
     io = v: {
         var i = std.Io.Threaded.init_single_threaded;
         break :v i.io();
