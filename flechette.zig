@@ -314,7 +314,7 @@ pub const IOFlavour = union(enum) {
                 result.argsRes = argsRes;
 
                 const alignment = regent.fs.oDirectAlignment;
-                var resizeableBuffer: std.ArrayListAlignedUnmanaged(u8, alignment) = .empty;
+                var resizeableBuffer: std.ArrayListAlignedUnmanaged(u8, alignment) = try .initCapacity(context.allocator, 1);
                 defer resizeableBuffer.deinit(context.allocator);
 
                 var failed: bool = false;
