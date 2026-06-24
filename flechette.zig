@@ -24,10 +24,11 @@ const openssl = @import("flechette/openssl.zig");
 
 pub fn dispatch(
     T: type,
+    ctx: *Ctx,
     request: *HashRequest(T),
     result: *HashResult(T.R),
 ) !void {
-    var totalTimer = std.Io.Clock.awake.now(io);
+    var totalTimer = std.Io.Clock.awake.now(ctx.io);
 
     var hasher = request.hasher;
     var reader = request.reader;
@@ -39,7 +40,7 @@ pub fn dispatch(
     var hasherElapsed: u64 = 0;
     var ioElapsed: u64 = 0;
     while (true) {
-        chunkTimer = std.Io.Clock.awake.now(io);
+        chunkTimer = std.Io.Clock.awake.now(ctx.io);
         const slice = reader.peekGreedy(1) catch |e| switch (e) {
             error.EndOfStream => rv: {
                 const eosChunk = reader.buffered();
@@ -52,15 +53,16 @@ pub fn dispatch(
         reader.tossBuffered();
         bytesProcessed += slice.len;
         chunkIndex += 1;
-        ioElapsed += @intCast(chunkTimer.untilNow(io, .awake).toNanoseconds());
+        ioElapsed += @intCast(chunkTimer.untilNow(ctx.io, .awake).toNanoseconds());
 
-        chunkTimer = std.Io.Clock.awake.now(io);
+        chunkTimer = std.Io.Clock.awake.now(ctx.io);
         hasher.roll(slice);
-        hasherElapsed += @intCast(chunkTimer.untilNow(io, .awake).toNanoseconds());
+        hasherElapsed += @intCast(chunkTimer.untilNow(ctx.io, .awake).toNanoseconds());
     }
-    const totalElapsed: u64 = @intCast(totalTimer.untilNow(io, .awake).toNanoseconds());
+    const totalElapsed: u64 = @intCast(totalTimer.untilNow(ctx.io, .awake).toNanoseconds());
 
     try result.print(
+        ctx,
         hasher.final(),
         chunkIndex,
         totalElapsed,
@@ -85,11 +87,12 @@ pub fn HashResult(T: type) type {
         context: regent.ergo.Context,
         argsRes: *const ArgsResponse,
         path: []const u8,
-        fileSize: u64,
+        fileSize: ?u64,
         auxBuff: if (RisSlice) ?[]u8 else void = if (RisSlice) null else {},
 
         pub fn print(
             self: *@This(),
+            ctx: *Ctx,
             hash: T,
             chunks: usize,
             elapsed: u64,
@@ -134,7 +137,11 @@ pub fn HashResult(T: type) type {
             } else @compileError("Invalid hash type: " ++ @typeName(T));
             defer if (TInfo == .pointer) self.context.allocator.free(hashStr);
 
-            try reporter.stdoutW.writeAll(hashStr);
+            // NOTE: this is actually insanely wasteful before IO happens after a lot of computations
+            try ctx.reporter.mutex.lock(ctx.io);
+            defer ctx.reporter.mutex.unlock(ctx.io);
+
+            try ctx.reporter.stdoutW.writeAll(hashStr);
 
             if (self.argsRes.options.name or self.argsRes.options.recursive or self.argsRes.options.@"recursive-follow-symlink") {
                 var vecBuff: [3][]const u8 = .{
@@ -142,9 +149,9 @@ pub fn HashResult(T: type) type {
                     self.path,
                     "\n",
                 };
-                try reporter.stdoutW.writeVecAll(&vecBuff);
+                try ctx.reporter.stdoutW.writeVecAll(&vecBuff);
             } else {
-                try reporter.stdoutW.writeAll("\n");
+                try ctx.reporter.stdoutW.writeAll("\n");
             }
 
             const benchmark = self.argsRes.options.benchmark;
@@ -155,7 +162,7 @@ pub fn HashResult(T: type) type {
                 const elapsedF: f128 = @floatFromInt(hasherElapsed);
                 const bytesProcessedF: f128 = @floatFromInt(bytesProcessed);
                 const elapsedInSec = elapsedF / units.NanoUnit.s;
-                try reporter.stderrW.print(
+                try ctx.reporter.stderrW.print(
                     "{s} hashing: 0x{s}, elapsed {d:.2}s {d:.2}ms, {d:.2} MB/s {d:.2} GB/s\n",
                     .{
                         @tagName(self.argsRes.verb.?),
@@ -170,12 +177,12 @@ pub fn HashResult(T: type) type {
 
             if (ioBenchmark) {
                 if (self.argsRes.positionals.tuple.@"0" == .mmap) {
-                    try reporter.stderrW.writeAll("mmap io: benchmark skipped, mmap can't be benchmarked separately\n");
+                    try ctx.reporter.stderrW.writeAll("mmap io: benchmark skipped, mmap can't be benchmarked separately\n");
                 } else {
                     const elapsedF: f128 = @floatFromInt(ioElapsed);
                     const bytesProcessedF: f128 = @floatFromInt(bytesProcessed);
                     const elapsedInSec = elapsedF / units.NanoUnit.s;
-                    try reporter.stderrW.print(
+                    try ctx.reporter.stderrW.print(
                         "{s} io: elapsed {d:.2}s {d:.2}ms, {d:.2} MB/s {d:.2} GB/s, chunk {d} {d:.2}%\n",
                         .{
                             @tagName(self.argsRes.positionals.tuple.@"0"),
@@ -184,14 +191,14 @@ pub fn HashResult(T: type) type {
                             bytesProcessedF / units.ByteUnit.mb / elapsedInSec,
                             bytesProcessedF / units.ByteUnit.gb / elapsedInSec,
                             chunks,
-                            bytesProcessedF / @as(f128, @floatFromInt(self.fileSize)) * 100.0,
+                            bytesProcessedF / @as(f128, @floatFromInt(self.fileSize orelse bytesProcessed)) * 100.0,
                         },
                     );
                 }
             }
 
             if (benchmark or ioBenchmark) {
-                try reporter.stderrW.print(
+                try ctx.reporter.stderrW.print(
                     "total hashing elapsed: {d:.2}s {d:.2}ms\n",
                     .{
                         totalElapsedF / units.NanoUnit.s,
@@ -200,8 +207,8 @@ pub fn HashResult(T: type) type {
                 );
             }
 
-            if (reporter.errIsTTY() and (benchmark or ioBenchmark)) try reporter.stderrW.flush();
-            if (reporter.outIsTTY()) try reporter.stdoutW.flush();
+            if (ctx.reporter.errIsTTY() and (benchmark or ioBenchmark)) try ctx.reporter.stderrW.flush();
+            if (ctx.reporter.outIsTTY()) try ctx.reporter.stdoutW.flush();
         }
 
         pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -225,47 +232,55 @@ pub const IOFlavour = union(enum) {
         MmapHasNoTargetFile,
     };
 
-    fn handleError(failed: *bool, path: []const u8, err: anyerror) !void {
+    // this uses a return param because it may fail itself
+    fn handleError(ctx: *Ctx, path: []const u8, err: anyerror, failed: *bool) !void {
         failed.* |= true;
-        try reporter.stdoutW.print("{s}    Could not hash file - {s}\n", .{
+        try ctx.reporter.mutex.lock(ctx.io);
+        defer ctx.reporter.mutex.unlock(ctx.io);
+
+        try ctx.reporter.stdoutW.print("{s}    Could not hash file - {s}\n", .{
             @errorName(err),
             path,
         });
-        if (reporter.outIsTTY()) try reporter.stdoutW.flush();
+        if (ctx.reporter.outIsTTY()) try ctx.reporter.stdoutW.flush();
     }
 
     pub fn run(
         self: *const IOFlavour,
         argsRes: *const ArgsResponse,
-        stackAllocator: std.mem.Allocator,
+        ctx: *Ctx,
     ) !bool {
         const VerbEnum = @typeInfo(Args.Verb).@"union".tag_type.?;
         const verb = argsRes.verb.?;
 
+        // TODO: this will use the main thread's stack memory, which is awful for core locality
+        // we need to trampoline from the actual thread, shit will be rad lol
         const stackContext: regent.ergo.Context = .{
-            .io = io,
-            .allocator = stackAllocator,
+            .io = ctx.io,
+            .allocator = ctx.stackAllocator,
         };
 
         const pageContext: regent.ergo.Context = .{
-            .io = io,
-            .allocator = if (builtin.mode == .Debug) stackAllocator else std.heap.smp_allocator,
+            .io = ctx.io,
+            .allocator = if (builtin.mode == .Debug) ctx.debugAllocator.allocator() else ctx.heapAllocator,
         };
 
         const mmapContext: regent.ergo.Context = .{
-            .io = io,
-            .allocator = stackAllocator,
+            .io = ctx.io,
+            // this is used for small allocations like WeakRef set for pathings etc
+            .allocator = ctx.stackAllocator,
         };
 
         const promoterContext: regent.ergo.Context = .{
-            .io = io,
+            .io = ctx.io,
             .allocator = if (builtin.mode == .Debug)
-                stackAllocator
+                ctx.debugAllocator.allocator()
             else r: {
-                const fba: *std.heap.FixedBufferAllocator = @ptrCast(@alignCast(stackAllocator.ptr));
+                // NOTE: promoter is just straightup broken in threaded even with fba threadSafe, so Promoting needs to be adapted
+                const fba: *std.heap.FixedBufferAllocator = @ptrCast(@alignCast(ctx.stackAllocator.ptr));
                 var promotingFba: regent.mem.PromotingSfba = .{
                     .fixed_buffer_allocator = fba.*,
-                    .fallback_allocator = std.heap.smp_allocator,
+                    .fallback_allocator = ctx.heapAllocator,
                 };
                 const allc = promotingFba.allocator();
                 break :r allc;
@@ -275,7 +290,6 @@ pub const IOFlavour = union(enum) {
         inline for (std.meta.fields(VerbEnum), std.meta.fields(Args.Verb)) |verbEField, verbUField| {
             if (std.mem.eql(u8, verbUField.name, @tagName(verb))) {
                 const HasherT = verbUField.type.HashT;
-                const paths: []const []const u8 = if (argsRes.positionals.reminder) |reminder| reminder else &.{"-"};
 
                 const context = switch (self.*) {
                     .mmap => mmapContext,
@@ -299,15 +313,6 @@ pub const IOFlavour = union(enum) {
                     inline else => |bUnit| if (bUnit != null) .byte else .full,
                 };
 
-                const recursive = argsRes.options.recursive or argsRes.options.@"recursive-follow-symlink";
-                const followSymlink = argsRes.options.@"recursive-follow-symlink";
-
-                var fileCursor = regent.fs.FileCursor(.read).initWithConfig(paths, .{
-                    .recursive = recursive,
-                    .followSymlink = followSymlink,
-                });
-                defer fileCursor.deinit();
-
                 var result: HashResult(HasherT.R) = undefined;
                 defer result.deinit(context.allocator);
                 result.context = context;
@@ -319,12 +324,24 @@ pub const IOFlavour = union(enum) {
 
                 var failed: bool = false;
                 while (true) {
-                    if (fileCursor.nextWithConfig(
+                    try ctx.fileCursorMutex.lock(ctx.io);
+                    errdefer ctx.fileCursorMutex.unlock(ctx.io);
+
+                    const r = ctx.fileCursor.nextWithConfig(
                         context,
                         openConfig,
                         if (bufferType == .mmap) .mmap else .unmanaged,
                         bufferConfig,
-                    )) |optStream| {
+                    );
+                    // NOTE: this needs refactoring, it's shit
+                    const optPath = if (ctx.fileCursor.currentPath()) |p|
+                        try ctx.heapAllocator.dupe(u8, p)
+                    else
+                        null;
+                    ctx.fileCursorMutex.unlock(ctx.io);
+                    defer if (optPath) |p| ctx.heapAllocator.free(p);
+
+                    if (r) |optStream| {
                         if (optStream == null) break;
                         var fstream = optStream.?;
                         defer {
@@ -354,8 +371,13 @@ pub const IOFlavour = union(enum) {
                             .unmanaged => unreachable,
                         }
 
-                        const path = fileCursor.currentPath().?;
+                        const path = optPath.?;
                         result.path = path;
+                        result.fileSize = switch (fstream.stat.kind) {
+                            .directory, .sym_link, .whiteout, .door, .event_port, .unknown => unreachable,
+                            .block_device, .character_device, .named_pipe, .unix_domain_socket => null,
+                            .file => fstream.stat.size,
+                        };
 
                         if (fstream.stream.size) |size| {
                             fstream.fadvise(context, 0, size, &.{
@@ -378,16 +400,18 @@ pub const IOFlavour = union(enum) {
                             .hasher = &hasher,
                         };
 
-                        dispatch(HasherT, &request, &result) catch |err|
+                        dispatch(HasherT, ctx, &request, &result) catch |err|
                             try handleError(
-                                &failed,
+                                ctx,
                                 path,
                                 err,
+                                &failed,
                             );
                     } else |err| try handleError(
-                        &failed,
-                        fileCursor.currentPath().?,
+                        ctx,
+                        optPath.?,
                         err,
+                        &failed,
                     );
                 }
                 return failed;
@@ -560,8 +584,16 @@ pub const Args = struct {
     name: bool = false,
     recursive: bool = false,
     @"recursive-follow-symlink": bool = false,
+    workers: u16 = 1,
+    @"worker-mode": WorkerMode = .async,
+
     // TODO: add file match
     // TODO: add directory match
+
+    pub const WorkerMode = enum {
+        async,
+        thread,
+    };
 
     pub const Short = .{
         .b = .benchmark,
@@ -571,6 +603,8 @@ pub const Args = struct {
         .n = .name,
         .r = .recursive,
         .R = .@"recursive-follow-symlink",
+        .w = .workers,
+        .wM = .@"worker-mode",
     };
 
     pub const Positionals = positionals.PositionalOf(.{
@@ -621,6 +655,11 @@ pub const Args = struct {
             .{ .field = .name, .description = "Prints path." },
             .{ .field = .recursive, .description = "Will recursively follow directories. Excludes --recursive-follow-symlink." },
             .{ .field = .@"recursive-follow-symlink", .description = "Will recursively follow directories and symlinks. Excludes --recursive." },
+            .{ .field = .workers, .description = "Number of workers to be used when handling --recursive or --recursive-follow-symlink. If 1, uses main thread/fiber." },
+            .{
+                .field = .@"worker-mode",
+                .description = "Worker execution mode. Supported values: " ++ zcasp.help.enumValueHint(WorkerMode) ++ ".",
+            },
         },
     };
 
@@ -645,6 +684,22 @@ const Reporter = struct {
     stderrStream: regent.fs.FileStream(.write) = undefined,
     stdoutW: *std.Io.Writer = undefined,
     stderrW: *std.Io.Writer = undefined,
+    mutex: std.Io.Mutex = .init,
+
+    pub fn init(self: *@This(), context: regent.ergo.Context) !void {
+        self.stdoutStream = try regent.fs.FileStream(.write).openStream(
+            context,
+            std.Io.File.stdout(),
+        );
+        self.stdoutW = &self.stdoutStream.stream.interface;
+
+        self.stderrStream = try regent.fs.FileStream(.write).openStream(
+            context,
+            std.Io.File.stderr(),
+        );
+        self.stderrW = &self.stderrStream.stream.interface;
+        self.mutex = .init;
+    }
 
     pub fn outIsTTY(self: *const @This()) bool {
         return self.stdoutStream.stat.kind == .character_device;
@@ -654,39 +709,71 @@ const Reporter = struct {
         return self.stderrStream.stat.kind == .character_device;
     }
 
-    pub fn deinit(self: *const @This(), context: regent.ergo.Context) void {
+    pub fn deinit(self: *@This(), context: regent.ergo.Context) void {
         var stderrS = self.stderrStream;
         stderrS.deinit(context);
         var stdoutS = self.stdoutStream;
         stdoutS.deinit(context);
+        self.stderrW.* = undefined;
+        self.stdoutW.* = undefined;
+        self.* = undefined;
     }
 };
 
-var reporter: *const Reporter = undefined;
-var io: std.Io = undefined;
+pub const Ctx = struct {
+    stagingIo: std.Io,
+    io: std.Io,
+    reporter: Reporter,
 
-pub fn main(init: std.process.Init.Minimal) !u8 {
-    const DebugAlloc = std.heap.DebugAllocator(.{});
-    var allocator: std.mem.Allocator = undefined;
-    const result = if (builtin.mode == .Debug) r: {
-        var dba: DebugAlloc = .init;
-        allocator = dba.allocator();
-        break :r trampMain(init, allocator);
-    } else regent.trampoline.stackTrampoline(
-        @typeInfo(@TypeOf(trampMain)).@"fn".return_type.?,
-        u6,
-        init,
-        trampMain,
-        if (builtin.mode == .Debug) 3 else 1,
-    );
+    // May be fba or dba if .Debug
+    stackAllocator: std.mem.Allocator,
+    // May be an actual heap allocator or dba if .Debug
+    heapAllocator: std.mem.Allocator,
+    debugAllocator: if (builtin.mode == .Debug) *DebugAllocator else void,
 
-    if (builtin.mode == .Debug) {
-        var dba: *DebugAlloc = @ptrCast(@alignCast(allocator.ptr));
-        switch (dba.deinit()) {
-            .leak => {},
-            .ok => {},
+    fileCursor: regent.fs.FileCursor(.read),
+    fileCursorMutex: std.Io.Mutex = .init,
+
+    pub const DebugAllocator = std.heap.DebugAllocator(.{});
+
+    pub fn deinit(self: *@This()) void {
+        if (!self.reporter.errIsTTY())
+            self.reporter.stderrW.flush() catch {};
+        if (!self.reporter.outIsTTY())
+            self.reporter.stdoutW.flush() catch {};
+        self.reporter.deinit(.{ .io = self.stagingIo, .allocator = self.stackAllocator });
+
+        if (builtin.mode == .Debug) {
+            switch (self.debugAllocator.deinit()) {
+                .leak => {},
+                .ok => {},
+            }
         }
     }
+};
+
+pub fn main(init: std.process.Init.Minimal) !u8 {
+    // NOTE: I honestly have no clue why this guy cant live in the stack
+    const ctx: *Ctx = try std.heap.smp_allocator.create(Ctx);
+    defer std.heap.smp_allocator.destroy(ctx);
+    defer ctx.deinit();
+
+    if (builtin.mode == .Debug) {
+        var dba: Ctx.DebugAllocator = .init;
+        ctx.debugAllocator = &dba;
+    }
+
+    const result = if (builtin.mode == .Debug)
+        trampMain(ctx.debugAllocator.allocator(), init, ctx)
+    else
+        // TODO: move args parser above stack trampoline
+        regent.trampoline.stackTrampoline(
+            u6,
+            // NOTE: this probably needs fiddling for ReleaseSafe and ReleaseSmall
+            1,
+            trampMain,
+            .{ null, init, ctx },
+        );
 
     return result;
 }
@@ -695,64 +782,102 @@ const MainError = error{
     ErrorPartitioningStackMemory,
 };
 
-pub fn trampMain(init: std.process.Init.Minimal, optStackAlloc: ?std.mem.Allocator) !u8 {
+pub fn trampMain(args: struct { ?std.mem.Allocator, std.process.Init.Minimal, *Ctx }) !u8 {
+    const optStackAlloc, const init, const ctx = args;
     if (optStackAlloc == null) return MainError.ErrorPartitioningStackMemory;
-    const stackAlloc = optStackAlloc.?;
+    ctx.stackAllocator = optStackAlloc.?;
+    ctx.heapAllocator = std.heap.smp_allocator;
 
-    // TODO: multithreading
-    io = v: {
-        var i = std.Io.Threaded.init_single_threaded;
-        break :v i.io();
+    ctx.stagingIo = r: {
+        var io = std.Io.Threaded.init_single_threaded;
+        break :r io.io();
     };
 
-    const context: regent.ergo.Context = .{
-        .allocator = stackAlloc,
-        .io = io,
+    const scrapContext: regent.ergo.Context = .{
+        .allocator = ctx.stackAllocator,
+        .io = ctx.stagingIo,
     };
 
-    reporter = rv: {
-        var r: Reporter = .{};
+    try ctx.reporter.init(scrapContext);
 
-        r.stdoutStream = try regent.fs.FileStream(.write).openStream(
-            context,
-            std.Io.File.stdout(),
-        );
-        r.stdoutW = &r.stdoutStream.stream.interface;
-        r.stderrStream = try regent.fs.FileStream(.write).openStream(
-            context,
-            std.Io.File.stderr(),
-        );
-        r.stderrW = &r.stderrStream.stream.interface;
-        break :rv &r;
-    };
-    defer {
-        if (!reporter.errIsTTY())
-            reporter.stderrW.flush() catch {};
-        if (!reporter.outIsTTY())
-            reporter.stdoutW.flush() catch {};
-        reporter.deinit(context);
-    }
-
-    var clock = std.Io.Clock.awake.now(io);
-    var argsRes: ArgsResponse = .init(stackAlloc);
+    var clock = std.Io.Clock.awake.now(scrapContext.io);
+    var argsRes: ArgsResponse = .init(scrapContext.allocator);
     defer argsRes.deinit();
 
     if (argsRes.parseArgs(init.args)) |parseError| {
-        try reporter.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{ parseError.lastOpt, parseError.lastToken });
-        try reporter.stderrW.writeAll(parseError.message orelse unreachable);
-        try reporter.stderrW.flush();
+        try ctx.reporter.stderrW.print("Last opt <{?s}>, Last token <{?s}>. ", .{ parseError.lastOpt, parseError.lastToken });
+        try ctx.reporter.stderrW.writeAll(parseError.message orelse unreachable);
+        try ctx.reporter.stderrW.flush();
         return 1;
     }
 
     if (argsRes.options.@"args-benchmark") {
-        try reporter.stderrW.print(
+        try ctx.reporter.stderrW.print(
             "args parser: elapsed {d:.2}ns\n",
-            .{clock.untilNow(io, .awake).toNanoseconds()},
+            .{clock.untilNow(scrapContext.io, .awake).toNanoseconds()},
         );
     }
+    const paths: []const []const u8 = if (argsRes.positionals.reminder) |reminder| reminder else &.{"-"};
+
+    const wCount = argsRes.options.workers;
+    ctx.io = if (wCount == 1)
+        ctx.stagingIo
+    else switch (argsRes.options.@"worker-mode") {
+        .async => v: {
+            var evented: std.Io.Evented = undefined;
+            // NOTE: using stack allocator here DESTROYS evented performance for some reason
+            // TODO: Recalculate: log2_ring_entries based on workers
+            try evented.init(ctx.heapAllocator, .{ .thread_limit = wCount });
+            break :v evented.io();
+        },
+        .thread => v: {
+            var tIo = std.Io.Threaded.init(ctx.heapAllocator, .{
+                .stack_size = units.ByteUnit.kb * 512,
+                .concurrent_limit = .limited(wCount),
+            });
+            break :v tIo.io();
+        },
+    };
+
+    const isRecursive = argsRes.options.recursive or argsRes.options.@"recursive-follow-symlink";
+    // NOTE: regent doesnt respect cancelation interally for syscalls overriden etc
+    // this needs to be fixed
+    ctx.fileCursor = regent.fs.FileCursor(.read).initWithConfig(paths, .{
+        .recursive = isRecursive,
+        .followSymlink = argsRes.options.@"recursive-follow-symlink",
+    });
+    ctx.fileCursorMutex = .init;
+
+    // this is as best effort as it gets
+    if (builtin.mode == .Debug) regent.ergo.assertDeepNotUndefined(ctx.*);
 
     const ioFlavour: IOFlavour = argsRes.positionals.tuple.@"0";
-    const hadErrors = try ioFlavour.run(&argsRes, stackAlloc);
 
-    return if (hadErrors) 1 else 0;
+    // TODO: comptime skip lock acquire logic for better single threaded perf
+    if (wCount == 1 or !isRecursive) {
+        const hadErrors = try ioFlavour.run(&argsRes, ctx);
+        return if (hadErrors) 1 else 0;
+    } else {
+        const FutureT = std.Io.Future(@typeInfo(@TypeOf(IOFlavour.run)).@"fn".return_type.?);
+        const futures: []FutureT = try scrapContext.allocator.alloc(FutureT, wCount);
+        defer scrapContext.allocator.free(futures);
+
+        for (futures) |*future|
+            future.* = switch (argsRes.options.@"worker-mode") {
+                .async => ctx.io.async(IOFlavour.run, .{ &ioFlavour, &argsRes, ctx }),
+                .thread => try ctx.io.concurrent(IOFlavour.run, .{ &ioFlavour, &argsRes, ctx }),
+            };
+
+        var hadErrors: bool = false;
+        var i: usize = 0;
+        while (i < futures.len) : (i += 1) {
+            hadErrors |= futures[i].await(ctx.io) catch |e| {
+                while (i < futures.len) : (i += 1) {
+                    _ = futures[i].cancel(ctx.io) catch {};
+                }
+                return e;
+            };
+        }
+        return if (hadErrors) 1 else 0;
+    }
 }

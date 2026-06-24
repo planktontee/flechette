@@ -4,12 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const keepSymbols = b.option(bool, "keep-symbols", "Keep symbols");
+
     const module = b.addModule("flechette", .{
         .root_source_file = b.path("flechette.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .strip = optimize == .ReleaseFast and !(b.option(bool, "keep-symbols", "Keep symbols") orelse false),
+        .strip = optimize == .ReleaseFast and !(keepSymbols orelse false),
         .omit_frame_pointer = optimize == .ReleaseFast,
     });
     const regent = b.dependency("regent", .{
@@ -24,6 +26,7 @@ pub fn build(b: *std.Build) void {
     module.addImport("regent", regent);
     module.addImport("zcasp", zcasp);
     zcasp.addImport("regent", regent);
+    // NOTE: this is not working with ReleaseSafe
     module.linkSystemLibrary("crypto", .{
         .preferred_link_mode = .static,
     });
