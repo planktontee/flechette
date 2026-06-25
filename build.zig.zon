@@ -9,8 +9,8 @@
         //     .path = "dependencies/regent",
         // },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent.git#4d5a44bc2020713b53d7b4673266ef81bf084c5a",
-            .hash = "regent-0.0.1-zgdbw91SAQDNux_kF3nNz6pilK3bIPBmv2rgUy2ZPxvB",
+            .url = "git+https://github.com/planktontee/regent.git#4e1c4cf73d0d7959e610614798c54e49c51997b5",
+            .hash = "regent-0.0.1-zgdbw_5VAQC_pYDKmS2eDA3RxkJ8UQYqJdsiZ3h3019G",
         },
         .zcasp = .{
             .url = "git+https://github.com/planktontee/zcasp.git#e552d8b864be0209d59b7f1619639b8aa2f088dc",
