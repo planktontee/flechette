@@ -16,6 +16,7 @@ const xxh3 = @import("flechette/xxh3.zig");
 const aegis = @import("flechette/aegis.zig");
 const rapidhash = @import("flechette/rapidhash.zig");
 const Blake2b = @import("flechette/blake2b.zig");
+const wyhash = @import("flechette/wyhash.zig");
 const byteUnit = zcasp.codec.byteUnit;
 const units = regent.units;
 const fs = regent.fs;
@@ -23,24 +24,25 @@ const c = @import("flechette/c.zig").c;
 const openssl = @import("flechette/openssl.zig");
 
 pub fn dispatch(
+    comptime hasBenchmark: bool,
     T: type,
     ctx: *Ctx,
     request: *HashRequest(T),
     result: *HashResult(T.R),
 ) !void {
-    var totalTimer = std.Io.Clock.awake.now(ctx.io);
+    var totalTimer: if (hasBenchmark) std.Io.Timestamp else void = if (hasBenchmark) std.Io.Clock.awake.now(ctx.io) else {};
 
     var hasher = request.hasher;
     var reader = request.reader;
 
-    var chunkIndex: usize = 0;
-    var bytesProcessed: u64 = 0;
+    var chunkIndex: if (hasBenchmark) usize else void = if (hasBenchmark) 0 else {};
+    var bytesProcessed: if (hasBenchmark) u64 else void = if (hasBenchmark) 0 else {};
 
-    var chunkTimer: std.Io.Timestamp = undefined;
-    var hasherElapsed: u64 = 0;
-    var ioElapsed: u64 = 0;
+    var chunkTimer: if (hasBenchmark) std.Io.Timestamp else void = if (hasBenchmark) undefined else {};
+    var hasherElapsed: if (hasBenchmark) u64 else void = if (hasBenchmark) 0 else {};
+    var ioElapsed: if (hasBenchmark) u64 else void = if (hasBenchmark) 0 else {};
     while (true) {
-        chunkTimer = std.Io.Clock.awake.now(ctx.io);
+        if (hasBenchmark) chunkTimer = std.Io.Clock.awake.now(ctx.io);
         const slice = reader.peekGreedy(1) catch |e| switch (e) {
             error.EndOfStream => rv: {
                 const eosChunk = reader.buffered();
@@ -51,21 +53,24 @@ pub fn dispatch(
             error.ReadFailed => return e,
         };
         reader.tossBuffered();
-        bytesProcessed += slice.len;
-        chunkIndex += 1;
-        ioElapsed += @intCast(chunkTimer.untilNow(ctx.io, .awake).toNanoseconds());
+        if (hasBenchmark) {
+            bytesProcessed += slice.len;
+            chunkIndex += 1;
+            ioElapsed += @intCast(chunkTimer.untilNow(ctx.io, .awake).toNanoseconds());
+            chunkTimer = std.Io.Clock.awake.now(ctx.io);
+        }
 
-        chunkTimer = std.Io.Clock.awake.now(ctx.io);
         hasher.roll(slice);
-        hasherElapsed += @intCast(chunkTimer.untilNow(ctx.io, .awake).toNanoseconds());
+        if (hasBenchmark) hasherElapsed += @intCast(chunkTimer.untilNow(ctx.io, .awake).toNanoseconds());
     }
-    const totalElapsed: u64 = @intCast(totalTimer.untilNow(ctx.io, .awake).toNanoseconds());
 
+    // move to ptr args
     try result.print(
+        hasBenchmark,
         ctx,
         hasher.final(),
         chunkIndex,
-        totalElapsed,
+        if (hasBenchmark) @intCast(totalTimer.untilNow(ctx.io, .awake).toNanoseconds()) else {},
         hasherElapsed,
         ioElapsed,
         bytesProcessed,
@@ -91,13 +96,14 @@ pub fn HashResult(T: type) type {
 
         pub fn print(
             self: *@This(),
+            comptime hasBenchmark: bool,
             ctx: *Ctx,
             hash: T,
-            chunks: usize,
-            elapsed: u64,
-            hasherElapsed: u64,
-            ioElapsed: u64,
-            bytesProcessed: u64,
+            chunks: if (hasBenchmark) usize else void,
+            elapsed: if (hasBenchmark) u64 else void,
+            hasherElapsed: if (hasBenchmark) u64 else void,
+            ioElapsed: if (hasBenchmark) u64 else void,
+            bytesProcessed: if (hasBenchmark) u64 else void,
         ) !void {
             const upcase = self.argsRes.options.uppercase;
             const TInfo = @typeInfo(T);
@@ -136,21 +142,22 @@ pub fn HashResult(T: type) type {
             } else @compileError("Invalid hash type: " ++ @typeName(T));
             defer if (TInfo == .pointer) self.context.allocator.free(hashStr);
 
-            // NOTE: this is actually insanely wasteful before IO happens after a lot of computations
             try ctx.reporter.mutex.lock(ctx.io);
             defer ctx.reporter.mutex.unlock(ctx.io);
 
             try ctx.reporter.stdoutW.writeAll(hashStr);
 
             if (self.argsRes.options.name or self.argsRes.options.recursive or self.argsRes.options.@"recursive-follow-symlink") {
-                var vecBuff: [3][]const u8 = .{
-                    "    ",
-                    self.path,
-                    "\n",
-                };
-                try ctx.reporter.stdoutW.writeVecAll(&vecBuff);
+                try ctx.reporter.stdoutW.writeAll("    ");
+                try ctx.reporter.stdoutW.writeAll(self.path);
+                try ctx.reporter.stdoutW.writeByte('\n');
             } else {
                 try ctx.reporter.stdoutW.writeAll("\n");
+            }
+
+            if (!hasBenchmark) {
+                if (ctx.reporter.outIsTTY()) try ctx.reporter.stdoutW.flush();
+                return;
             }
 
             const benchmark = self.argsRes.options.benchmark;
@@ -271,14 +278,22 @@ pub const IOFlavour = union(enum) {
         };
     }
 
+    pub const RunArgs = struct {
+        *const ArgsResponse,
+        *Ctx,
+        *IoFlavourContext,
+        *regent.fs.FileStream(.read),
+        []const u8,
+        usize,
+    };
+
     pub fn run(
         self: @This(),
-        argsRes: *const ArgsResponse,
-        ctx: *Ctx,
-        ioCtx: *IoFlavourContext,
-        fstream: *regent.fs.FileStream(.read),
-        path: []const u8,
-    ) !struct { bool, *IoFlavourContext } {
+        runArgs: *RunArgs,
+    ) !struct { bool, *RunArgs } {
+        const argsRes, const ctx, const ioCtx, const fstream, const path, const id = runArgs.*;
+        _ = id;
+
         const VerbEnum = @typeInfo(Args.Verb).@"union".tag_type.?;
         const verb = argsRes.verb.?;
 
@@ -350,15 +365,26 @@ pub const IOFlavour = union(enum) {
                     .hasher = &hasher,
                 };
 
-                dispatch(HasherT, ctx, &request, &result) catch |err|
-                    try handleError(
-                        ctx,
-                        path,
-                        err,
-                        &failed,
-                    );
+                const benchmark = argsRes.options.benchmark or argsRes.options.@"io-benchmark";
 
-                return .{ failed, ioCtx };
+                if (benchmark)
+                    dispatch(true, HasherT, ctx, &request, &result) catch |err|
+                        try handleError(
+                            ctx,
+                            path,
+                            err,
+                            &failed,
+                        )
+                else
+                    dispatch(false, HasherT, ctx, &request, &result) catch |err|
+                        try handleError(
+                            ctx,
+                            path,
+                            err,
+                            &failed,
+                        );
+
+                return .{ failed, runArgs };
             }
         } else unreachable;
     }
@@ -529,13 +555,13 @@ pub const Args = struct {
     recursive: bool = false,
     @"recursive-follow-symlink": bool = false,
     workers: u16 = 1,
-    @"worker-mode": WorkerMode = .evented,
+    @"worker-mode": WorkerMode = .event,
 
     // TODO: add file match
     // TODO: add directory match
 
     pub const WorkerMode = enum {
-        evented,
+        event,
         thread,
     };
 
@@ -570,6 +596,7 @@ pub const Args = struct {
         md5: BasicHashingCmd(openssl.MD5, "md5"),
         sha256: BasicHashingCmd(openssl.SHA256, "sha256"),
         blake2b: Blake2bCmd,
+        wyhash: BasicHashingCmd(wyhash, "wyhash"),
     };
 
     pub const Help: HelpData(@This()) = .{
@@ -654,10 +681,8 @@ const Reporter = struct {
     }
 
     pub fn deinit(self: *@This(), context: regent.ergo.Context) void {
-        var stderrS = self.stderrStream;
-        stderrS.deinit(context);
-        var stdoutS = self.stdoutStream;
-        stdoutS.deinit(context);
+        self.stderrStream.deinit(context);
+        self.stdoutStream.deinit(context);
         self.stderrW.* = undefined;
         self.stdoutW.* = undefined;
         self.* = undefined;
@@ -696,9 +721,7 @@ pub const Ctx = struct {
 };
 
 pub fn main(init: std.process.Init.Minimal) !u8 {
-    // NOTE: I honestly have no clue why this guy cant live in the stack
-    const ctx: *Ctx = try std.heap.smp_allocator.create(Ctx);
-    defer std.heap.smp_allocator.destroy(ctx);
+    var ctx: Ctx = undefined;
 
     if (builtin.mode == .Debug) {
         var dba: Ctx.DebugAllocator = .init;
@@ -714,8 +737,11 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
     const scrapContext: regent.ergo.Context = .{
         .allocator = if (builtin.mode == .Debug)
             ctx.debugAllocator.allocator()
-        else
-            ctx.heapAllocator,
+        else r: {
+            var buff: [units.ByteUnit.mb]u8 = undefined;
+            var fba = std.heap.FixedBufferAllocator.init(&buff);
+            break :r fba.allocator();
+        },
         .io = ctx.stagingIo,
     };
 
@@ -740,23 +766,17 @@ pub fn main(init: std.process.Init.Minimal) !u8 {
         );
     }
 
-    // const needsStackBump: bool = switch (argsRes.positionals.tuple.@"0") {
-    //     .promoter, .stack => true,
-    //     .mmap, .heap, .direct => false,
-    // };
+    if (!regent.linux.kernVersionOrAbove(6, 0, 0)) argsRes.options.@"worker-mode" = .thread;
 
     const result = if (comptime builtin.mode == .Debug)
-        trampMain(.{ ctx.debugAllocator.allocator(), ctx, &argsRes })
-        // else if (!needsStackBump)
-        //     trampMain(.{ ctx.heapAllocator, ctx, &argsRes })
+        trampMain(.{ ctx.debugAllocator.allocator(), &ctx, &argsRes })
     else
-        // TODO: move args parser above stack trampoline
         regent.trampoline.stackTrampoline(
             u6,
             // NOTE: this probably needs fiddling for ReleaseSafe and ReleaseSmall
-            1,
+            2,
             trampMain,
-            .{ null, ctx, &argsRes },
+            .{ null, &ctx, &argsRes },
         );
 
     return result;
@@ -775,9 +795,9 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
     ctx.io = if (wCount == 1)
         ctx.stagingIo
     else switch (argsRes.options.@"worker-mode") {
-        .evented => v: {
+        .event => v: {
             var evented: std.Io.Evented = undefined;
-            // NOTE: using stack allocator here DESTROYS evented performance for some reason
+            // NOTE: stack allocator hurts performance here
             // NOTE: at least .thread_limit = 1 is needed for await responses
             // TODO: Recalculate: log2_ring_entries based on workers
             try evented.init(ctx.heapAllocator, .{ .thread_limit = 1 });
@@ -785,6 +805,7 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
         },
         .thread => v: {
             var tIo = std.Io.Threaded.init(ctx.heapAllocator, .{
+                // NOTE: it's possible to lower it to 256 but it makes it run significantly slower
                 .stack_size = units.ByteUnit.kb * 512,
                 .concurrent_limit = .limited(wCount),
             });
@@ -794,7 +815,7 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
 
     const paths: []const []const u8 = if (argsRes.positionals.reminder) |reminder| reminder else &.{"-"};
     const isRecursive = argsRes.options.recursive or argsRes.options.@"recursive-follow-symlink";
-    // NOTE: regent doesnt respect cancelation interally for syscalls overriden etc
+    // NOTE: regent doesnt respect cancelation internally for syscalls overriden etc
     // this needs to be fixed
     ctx.fileCursor = regent.fs.FileCursor(.read).initWithConfig(paths, .{
         .recursive = isRecursive,
@@ -828,7 +849,6 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
             .allocator = if (builtin.mode == .Debug)
                 ctx.debugAllocator.allocator()
             else r: {
-                // NOTE: promoter is just straightup broken in threaded even with fba threadSafe, so Promoting needs to be adapted
                 const fba: *std.heap.FixedBufferAllocator = @ptrCast(@alignCast(ctx.stackAllocator.ptr));
                 var promotingFba: regent.mem.PromotingSfba = .{
                     .fixed_buffer_allocator = fba.*,
@@ -841,11 +861,13 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
     };
 
     if (wCount == 1 or !isRecursive) {
+        const scrapAlloc = ctx.heapAllocator;
         var ioCtx: IoFlavourContext = undefined;
         try ioCtx.init(context);
         defer ioCtx.deinit();
 
         var hadErrors: bool = false;
+        var runArgs: IOFlavour.RunArgs = .{ argsRes, ctx, &ioCtx, undefined, undefined, 0 };
         while (true) {
             const r = ctx.fileCursor.nextWithConfig(
                 context,
@@ -855,18 +877,22 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
             );
             // NOTE: this needs refactoring, it's shit
             const optPath = if (ctx.fileCursor.currentPath()) |p|
-                try context.allocator.dupe(u8, p)
+                try scrapAlloc.dupe(u8, p)
             else
                 null;
-            defer if (optPath) |path| context.allocator.free(path);
+            defer if (optPath) |path| scrapAlloc.free(path);
 
             if (r) |optStream| {
                 if (optStream == null) break;
                 var fstream = optStream.?;
                 const path = optPath.?;
 
-                const failed, const rIoCtx = try ioFlavour.run(argsRes, ctx, &ioCtx, &fstream, path);
-                _ = rIoCtx;
+                runArgs.@"3" = &fstream;
+                runArgs.@"4" = path;
+
+                const failed, const rRunArgs = try ioFlavour.run(&runArgs);
+                _ = rRunArgs;
+
                 hadErrors |= failed;
             } else |err| try handleError(
                 ctx,
@@ -878,25 +904,43 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
 
         return if (hadErrors) 1 else 0;
     } else {
-        const ioCtxs: []IoFlavourContext = try context.allocator.alloc(IoFlavourContext, wCount);
-        defer context.allocator.free(ioCtxs);
+        const scrapAlloc = ctx.stackAllocator;
+
+        const ioCtxs: []IoFlavourContext = try scrapAlloc.alloc(IoFlavourContext, wCount);
+        defer scrapAlloc.free(ioCtxs);
         defer for (ioCtxs) |*ioCtx| ioCtx.deinit();
+        var i: usize = 0;
+        while (i < wCount) : (i += 1) try ioCtxs[i].init(context);
+
+        const runArgs: []IOFlavour.RunArgs = try scrapAlloc.alloc(IOFlavour.RunArgs, wCount);
+        defer scrapAlloc.free(runArgs);
+        i = 0;
+        while (i < wCount) : (i += 1) runArgs[i] = .{ argsRes, ctx, &ioCtxs[i], undefined, undefined, undefined };
+
+        var fstreams: []regent.fs.FileStream(.read) = try scrapAlloc.alloc(regent.fs.FileStream(.read), wCount);
+        defer scrapAlloc.free(fstreams);
+
+        const inflightPaths: [][]const u8 = try scrapAlloc.alloc([]const u8, wCount);
+        i = 0;
+        while (i < wCount) : (i += 1) inflightPaths[i] = &.{};
+        defer scrapAlloc.free(inflightPaths);
+        errdefer {
+            for (inflightPaths) |inflight|
+                if (inflight.len != 0)
+                    scrapAlloc.free(inflight);
+        }
 
         const R = union(enum) {
             r: @typeInfo(@TypeOf(IOFlavour.run)).@"fn".return_type.?,
         };
 
-        const q: []R = try context.allocator.alloc(R, wCount);
-        defer context.allocator.free(q);
+        const q: []R = try scrapAlloc.alloc(R, wCount);
+        defer scrapAlloc.free(q);
 
         var hadErrors: bool = false;
         var select: std.Io.Select(R) = .init(ctx.io, q);
 
-        var pathArena = std.heap.ArenaAllocator.init(context.allocator);
-        defer pathArena.deinit();
-        const pathArenaAlloc = pathArena.allocator();
-
-        var i: usize = 0;
+        i = 0;
         var queued: usize = 0;
         const openConfig = ioFlavour.openConfig();
         const buffConfig = ioFlavour.bufferConfig();
@@ -910,14 +954,14 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
             );
             // NOTE: this needs refactoring, it's shit
             const optPath = if (ctx.fileCursor.currentPath()) |p|
-                try pathArenaAlloc.dupe(u8, p)
+                try scrapAlloc.dupe(u8, p)
             else
                 null;
 
             if (r) |optStream| {
                 if (optStream == null) {
                     if (queued > 0) {
-                        const failed, const ioCtx = switch (select.await() catch |e| {
+                        const failed, const runArg = switch (select.await() catch |e| {
                             select.cancelDiscard();
                             return e;
                         }) {
@@ -927,7 +971,9 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
                             },
                         };
                         hadErrors |= failed;
-                        _ = ioCtx;
+
+                        scrapAlloc.free(runArg.@"4");
+                        inflightPaths[runArg.@"5"] = &.{};
 
                         queued -= 1;
                         continue;
@@ -935,24 +981,21 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
                     unreachable;
                 }
 
-                const fstream = try pathArenaAlloc.create(regent.fs.FileStream(.read));
-                fstream.* = optStream.?;
                 const path = optPath.?;
 
                 if (i < wCount) {
-                    try ioCtxs[i].init(context);
+                    fstreams[i] = optStream.?;
+                    const runArg = &runArgs[i];
+                    runArg.@"3" = &fstreams[i];
+                    runArg.@"4" = path;
+                    runArg.@"5" = i;
+                    inflightPaths[i] = path;
 
-                    switch (argsRes.options.@"worker-mode") {
-                        .thread, .evented => select.async(.r, IOFlavour.run, .{ ioFlavour, argsRes, ctx, &ioCtxs[i], fstream, path }),
-                        // .thread => select.concurrent(.r, IOFlavour.run, .{ ioFlavour, argsRes, ctx, &ioCtxs[i], fstream, path }) catch |e| {
-                        //     select.cancelDiscard();
-                        //     return e;
-                        // },
-                    }
+                    select.async(.r, IOFlavour.run, .{ ioFlavour, runArg });
                     i += 1;
                     queued += 1;
                 } else {
-                    const failed, const ioCtx = switch (select.await() catch |e| {
+                    const failed, const runArg = switch (select.await() catch |e| {
                         select.cancelDiscard();
                         return e;
                     }) {
@@ -963,20 +1006,24 @@ pub fn trampMain(args: struct { ?std.mem.Allocator, *Ctx, *const ArgsResponse })
                     };
                     hadErrors |= failed;
 
-                    switch (argsRes.options.@"worker-mode") {
-                        .thread, .evented => select.async(.r, IOFlavour.run, .{ ioFlavour, argsRes, ctx, ioCtx, fstream, path }),
-                        // .thread => select.concurrent(.r, IOFlavour.run, .{ ioFlavour, argsRes, ctx, ioCtx, fstream, path }) catch |e| {
-                        //     select.cancelDiscard();
-                        //     return e;
-                        // },
-                    }
+                    scrapAlloc.free(runArg.@"4");
+                    inflightPaths[runArg.@"5"] = &.{};
+                    fstreams[runArg.@"5"] = optStream.?;
+
+                    runArg.@"3" = &fstreams[runArg.@"5"];
+                    runArg.@"4" = path;
+
+                    select.async(.r, IOFlavour.run, .{ ioFlavour, runArg });
                 }
-            } else |err| try handleError(
-                ctx,
-                optPath.?,
-                err,
-                &hadErrors,
-            );
+            } else |err| {
+                defer scrapAlloc.free(optPath.?);
+                try handleError(
+                    ctx,
+                    optPath.?,
+                    err,
+                    &hadErrors,
+                );
+            }
         }
 
         return if (hadErrors) 1 else 0;
